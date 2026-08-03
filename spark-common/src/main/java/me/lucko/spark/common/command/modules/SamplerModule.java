@@ -85,6 +85,9 @@ public class SamplerModule implements CommandModule {
                 .argumentUsage("start", "only-ticks-over", "tick length millis")
                 .argumentUsage("start", "interval", "interval millis")
                 .argumentUsage("start", "alloc", null)
+                .argumentUsage("start", "leaks", null) // fork
+                .argumentUsage("start", "native-leaks", null) // fork
+                .argumentUsage("start", "heap-leaks", null) // fork
                 .argumentUsage("stop", "", null)
                 .argumentUsage("cancel", "", null)
                 .executor(this::profiler)
@@ -99,7 +102,8 @@ public class SamplerModule implements CommandModule {
                         }
                         if (subCommand.equals("start")) {
                             opts = new ArrayList<>(Arrays.asList("--timeout", "--regex", "--combine-all",
-                                    "--not-combined", "--interval", "--only-ticks-over", "--force-java-sampler", "--alloc", "--alloc-live-only"));
+                                    "--not-combined", "--interval", "--only-ticks-over", "--force-java-sampler", "--alloc", "--alloc-live-only",
+                                    "--leaks", "--native-leaks", "--heap-leaks")); // fork
                             opts.removeAll(arguments);
                             opts.add("--thread"); // allowed multiple times
                         }
@@ -182,6 +186,14 @@ public class SamplerModule implements CommandModule {
         }
 
         SamplerMode mode = arguments.boolFlag("alloc") ? SamplerMode.ALLOCATION : SamplerMode.EXECUTION;
+
+        // fork - leak detection engines, layered on top of whatever the primary mode is.
+        // --leaks is the headline flag and turns on both, so the common case ("something is
+        // eating memory and I don't know which kind") is a single command rather than asking
+        // the user to already know whether their leak is on-heap or off-heap.
+        boolean allLeaks = arguments.boolFlag("leaks");
+        boolean nativeLeaks = allLeaks || arguments.boolFlag("native-leaks");
+        boolean heapLeaks = allLeaks || arguments.boolFlag("heap-leaks");
         boolean allocLiveOnly = arguments.boolFlag("alloc-live-only");
 
         double interval = arguments.doubleFlag("interval");
@@ -231,6 +243,8 @@ public class SamplerModule implements CommandModule {
 
         SamplerBuilder builder = new SamplerBuilder();
         builder.mode(mode);
+        builder.nativeMemoryLeaks(nativeLeaks); // fork
+        builder.heapLeaks(heapLeaks); // fork
         builder.threadDumper(threadDumper);
         builder.threadGrouper(threadGrouper);
         if (timeoutSeconds != -1) {

@@ -240,4 +240,39 @@ public abstract class AbstractSampler implements Sampler {
             proto.putAllLineSources(classSourceVisitor.getLineSourceMapping());
         }
     }
+
+    /**
+     * fork - exports an additional data tree into one of the this fork-specific proto fields.
+     *
+     * <p>Deliberately separate from {@link #writeDataToProto}: that method also writes the
+     * time-window list, window statistics and class-source mappings, all of which are
+     * profile-wide and must be written exactly once from the primary (execution) tree. Calling
+     * it a second time for the native-memory or heap-leak tree would duplicate those and
+     * corrupt the profile.</p>
+     *
+     * <p>The value transformer is fixed to identity here because both extra trees are measured
+     * in bytes already - unlike execution time, which is converted from microseconds.</p>
+     *
+     * @return total bytes across the exported tree, for the summary in this forkProfileContents
+     */
+    protected long writeExtraDataToProto(DataAggregator dataAggregator, Function<ProtoTimeEncoder, NodeExporter> nodeExporterFunction, java.util.function.Consumer<me.lucko.spark.proto.SparkSamplerProtos.ThreadNode> consumer) {
+        List<ThreadNode> data = dataAggregator.exportData();
+        if (data.isEmpty()) {
+            return 0L;
+        }
+        data.sort(Comparator.comparing(ThreadNode::getThreadLabel));
+
+        ProtoTimeEncoder timeEncoder = new ProtoTimeEncoder(value -> value, data);
+        NodeExporter exporter = nodeExporterFunction.apply(timeEncoder);
+
+        long total = 0L;
+        for (ThreadNode entry : data) {
+            me.lucko.spark.proto.SparkSamplerProtos.ThreadNode exported = exporter.export(entry);
+            consumer.accept(exported);
+            for (double t : exported.getTimesList()) {
+                total += (long) t;
+            }
+        }
+        return total;
+    }
 }

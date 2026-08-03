@@ -1,79 +1,98 @@
-<h1 align="center">
-	<img
-		alt="spark"
-		src="https://spark.lucko.me/assets/banner.png">
-</h1>
+<h1 align="center">spark (native memory fork)</h1>
 
 <h3 align="center">
-  spark is a performance profiler for Minecraft clients, servers and proxies.
+  A fork of <a href="https://github.com/lucko/spark">spark</a> that adds native memory and heap leak detection.
 </h3>
 
-#### Useful Links
-* [**Website**](https://spark.lucko.me/) - browse the project homepage
-* [**Documentation**](https://spark.lucko.me/docs) - read documentation and usage guides
-* [**Downloads**](https://spark.lucko.me/download) - latest plugin/mod downloads
+---
 
+## What this fork adds
 
-## What does spark do?
+Upstream spark profiles CPU time and Java allocation. It never looks at `malloc`, so
+off-heap memory is invisible to it — and that is where a large class of real Minecraft
+server memory problems live: zlib streams behind `Inflater`/`Deflater` that were never
+`end()`ed, Netty direct buffers never `release()`d, image codec state never `dispose()`d,
+memory allocated inside JNI libraries. The symptom is a server whose RSS climbs for days
+while the Java heap graph stays flat, and then gets OOM-killed.
 
-spark is made up of three separate components:
+This fork adds native memory leak detection and folds it together with Java heap leak
+detection into the existing profiler command.
 
-* **CPU Profiler**: Diagnose performance issues.
-* **Memory Inspection**: Diagnose memory issues.
-* **Server Health Reporting**: Keep track of overall server health.
+```
+/spark profiler start --leaks --timeout 3600
+```
 
-### :zap: CPU Profiler
+| Flag | What it adds |
+|---|---|
+| `--leaks` | both native and heap leak detection |
+| `--native-leaks` | off-heap only |
+| `--heap-leaks` | Java heap retention only |
 
-spark's profiler can be used to diagnose performance issues: "lag", low tick rate, high CPU usage, etc.
+Everything else behaves exactly like upstream spark. Same command, same permissions,
+same viewer links. It is a drop-in replacement: remove `spark.jar`, add this jar.
 
-It is:
+## How it works
 
-* **Lightweight** - can be ran in production with minimal impact.
-* **Easy to use** - no configuration or setup necessary, just install the plugin/mod.
-* **Quick to produce results** - running for just ~30 seconds is enough to produce useful insights into problematic areas for performance.
-* **Customisable** - can be tuned to target specific threads, sample at a specific interval, record only "laggy" periods, etc
-* **Highly readable** - simple tree structure lends itself to easy analysis and interpretation. The viewer can also apply deobfuscation mappings.
+async-profiler's `event=` is single-valued, but `alloc=` and `nativemem=` are separate
+additive engines, so one recording can carry execution samples, live-object allocation
+samples and malloc/free events simultaneously. Verified against async-profiler 4.5: a
+single run of `event=wall,interval=10ms,alloc=512k,live,nativemem` produced
+`profiler.WallClockSample`, `profiler.Malloc`, `profiler.Free`, `profiler.LiveObject`
+and `jdk.ObjectAllocationInNewTLAB` in one JFR, with native leak totals matching a
+nativemem-only run of the same workload to within 4%.
 
-It works by sampling statistical data about the systems activity, and constructing a call graph based on this data. The call graph is then displayed in an online viewer for further analysis by the user.
+A native leak is an allocation with no matching free. This fork correlates malloc
+against free by address in-process — the same approach as async-profiler's
+`jfrconv --leak`, but built in, so no conversion tool is needed on the server. Verified
+against a real JFR it produces byte-identical totals to `jfrconv --leak`.
 
-There are two different profiler engines:
-* Native/Async - uses the [async-profiler](https://github.com/async-profiler/async-profiler) library (*only available on Linux & macOS systems*)
-* Java - uses `ThreadMXBean`, an improved version of the popular [WarmRoast profiler](https://github.com/sk89q/WarmRoast) by sk89q.
+Allocations in the final 10% of the recording are discarded: they have not had a fair
+chance to be freed yet, and without that correction a genuine slow leak is buried under
+normal short-lived allocation.
 
-### :zap: Memory Inspection
+## Things to know
 
-spark includes a number of tools which are useful for diagnosing memory issues with a server.
+**Window rotation is disabled during leak detection.** A leak is by definition an
+allocation that outlives the window it was made in, so spark's usual 60-second rotation
+would report almost everything as leaked while losing the long-lived allocations that
+matter. Consequence: `--leaks` cannot be combined with `--only-ticks-over`, and says so
+rather than producing wrong data.
 
-* **Heap Summary** - take & analyse a basic snapshot of the servers memory
-  * A simple view of the JVM's heap, see memory usage and instance counts for each class
-  * Not intended to be a full replacement of proper memory analysis tools. (see next item)
-* **Heap Dump** - take a full (HPROF) snapshot of the servers memory
-  * Dumps (& optionally compresses) a full snapshot of JVM's heap.
-  * This snapshot can then be inspected using conventional analysis tools.
-* **GC Monitoring** - monitor garbage collection activity on the server
-  * Allows the user to relate GC activity to game server hangs, and easily see how long they are taking & how much memory is being free'd.
-  * Observe frequency/duration of young/old generation garbage collections to inform which GC tuning flags to use
+**Leak detection requires async-profiler**, so Linux or macOS, not Windows. It fails
+loudly rather than handing back a profile with no leak data in it.
 
-### :zap: Server Health Reporting
+**`nativemem` intercepts `malloc`/`realloc`/`calloc`/`free`, but not `mmap`.** Metaspace,
+the JIT code cache, GC structures and `MappedByteBuffer` are largely invisible. For a
+suspected classloader/metaspace leak from repeated `/reload`, use NMT instead.
 
-spark can report a number of metrics summarising the servers overall health.
+**Not all native growth is a plugin's fault.** glibc arena retention can show over a
+gigabyte of RSS with no leak at all, and Netty's pooled arenas grow to peak load and
+stay there by design. A plateau is normal; monotonic growth is suspicious.
 
-These metrics include:
+## Data format
 
-* **TPS** - ticks per second, to a more accurate degree indicated by the /tps command
-* **Tick Durations** - how long each tick is taking (min, max and average)
-* **CPU Usage** - how much of the CPU is being used by the process, and by the overall system
-* **Memory Usage** - how much memory is being used by the process
-* **Disk Usage** - how much disk space is free/being used by the system
+Profiles keep the standard `application/x-spark-sampler` content type, so links still
+open in the normal spark viewer — which renders the CPU profile and silently ignores the
+leak data it doesn't know about (proto3 ignores unknown fields). Reading the leak data
+needs a consumer that understands the extended schema; field numbers are in `CHANGES.md`.
 
-As well as providing tick rate averages, spark can also **monitor individual ticks** - sending a report whenever a single tick's duration exceeds a certain threshold. This can be used to identify trends and the nature of performance issues, relative to other system or game events.
+## Building
 
-For a comparison between spark, WarmRoast, Minecraft timings and other profiles, see this [page](https://spark.lucko.me/docs/misc/spark-vs-others) in the spark docs.
+```bash
+./gradlew :spark-bukkit:build
+```
 
-## License
+Requires JDK 21. Output is `spark-<version>-bukkit.jar` — **use the bukkit jar**, on
+Paper too. The `spark-paper` module is the library Paper bundles inside the server jar
+and has no `plugin.yml`; it is not a drop-in plugin.
 
-spark is free & open source. It is released under the terms of the GNU GPLv3 license. Please see [`LICENSE.txt`](LICENSE.txt) for more information. 
+## Licence
 
-The spark API submodule is released under the terms of the more permissive MIT license. Please see [`spark-api/LICENSE.txt`](spark-api/LICENSE.txt) for more information.
+**GPL-3.0-or-later**, same as spark — this cannot be relicensed. Original copyright
+notices are intact. `CHANGES.md` lists every modification, as GPLv3 §5(a) requires.
 
-spark is a fork of [WarmRoast](https://github.com/sk89q/WarmRoast), which was also [licensed using the GPLv3](https://github.com/sk89q/WarmRoast/blob/3fe5e5517b1c529d95cf9f43fd8420c66db0092a/src/main/java/com/sk89q/warmroast/WarmRoast.java#L1-L17).
+spark is itself a fork of [WarmRoast](https://github.com/sk89q/WarmRoast) by sk89q, also
+GPLv3. Bundled async-profiler is Apache-2.0.
+
+Not affiliated with or endorsed by lucko. Please don't report this fork's bugs to the
+spark issue tracker. Upstream's README is preserved as `README.spark.md`.

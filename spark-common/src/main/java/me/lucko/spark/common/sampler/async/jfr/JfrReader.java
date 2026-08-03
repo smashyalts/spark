@@ -1013,7 +1013,7 @@ public class JfrReader implements Closeable {
         }
     }
 
-    static class LiveObject extends Event {
+    public static class LiveObject extends Event { // fork - made public for heap leak aggregation
         public final int classId;
         public final long allocationSize;
         public final long allocationTime;
@@ -1050,7 +1050,7 @@ public class JfrReader implements Closeable {
         }
     }
 
-    static class MallocEvent extends Event {
+    public static class MallocEvent extends Event { // fork - made public for native memory leak aggregation
         public final long address;
         public final long size;
 

@@ -31,9 +31,13 @@ import me.lucko.spark.common.tick.TickHook;
 import me.lucko.spark.common.util.SparkScheduledThreadPoolExecutor;
 import me.lucko.spark.common.util.SparkThreadFactory;
 import me.lucko.spark.common.ws.ViewerSocket;
+import me.lucko.spark.proto.SparkSamplerProtos;
 import me.lucko.spark.proto.SparkSamplerProtos.SamplerData;
 
+import com.google.common.collect.ImmutableList; // fork
+import java.util.LinkedHashMap; // fork
 import java.util.Locale;
+import java.util.Map; // fork
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -45,6 +49,9 @@ import java.util.logging.Level;
  */
 public class AsyncSampler extends AbstractSampler {
 
+    /** fork - version stamped into every profile so a reader knows which build produced it */
+    public static final String FORK_VERSION = "spark-nativemem-1.0";
+
     /** Function to collect and measure samples - either execution or allocation */
     private final SampleCollector<?> sampleCollector;
 
@@ -53,6 +60,16 @@ public class AsyncSampler extends AbstractSampler {
 
     /** Responsible for aggregating and then outputting collected sampling data */
     private final AsyncDataAggregator dataAggregator;
+
+    /**
+     * fork - additional collectors captured by the same recording, each with its own
+     * aggregator. Keyed by collector so {@link AsyncProfilerJob#aggregate} can route events
+     * from the shared JFR into the right tree.
+     */
+    private final Map<SampleCollector<?>, AsyncDataAggregator> extraAggregators = new LinkedHashMap<>();
+
+    /** fork - thread grouper, retained so extra aggregators are grouped identically */
+    private final me.lucko.spark.common.sampler.ThreadGrouper threadGrouper;
 
     /** Whether to force the sampler to use monotonic/nano time */
     private final boolean forceNanoTime;
@@ -81,9 +98,24 @@ public class AsyncSampler extends AbstractSampler {
         super(platform, settings);
         this.sampleCollector = collector;
         this.dataAggregator = dataAggregator;
+        this.threadGrouper = settings.threadGrouper(); // fork
         this.forceNanoTime = forceNanoTime;
         this.profilerAccess = AsyncProfilerAccess.getInstance(platform);
         this.scheduler = new SparkScheduledThreadPoolExecutor(1, new SparkThreadFactory("spark-async-sampler-worker", false));
+    }
+
+    /**
+     * fork - registers an additional collector to be captured by the same recording.
+     *
+     * <p>Must be called before {@link #start()}. Each collector gets its own aggregator so the
+     * resulting trees stay separate - CPU milliseconds and leaked bytes are not commensurable
+     * and must never be summed into one tree.</p>
+     */
+    public void addExtraCollector(SampleCollector<?> collector) {
+        if (this.startTime != -1) {
+            throw new IllegalStateException("Sampler already started");
+        }
+        this.extraAggregators.put(collector, new AsyncDataAggregator(this.threadGrouper, false));
     }
 
     /**
@@ -102,13 +134,28 @@ public class AsyncSampler extends AbstractSampler {
         int window = ProfilingWindowUtils.windowNow();
 
         AsyncProfilerJob job = this.profilerAccess.startNewProfilerJob();
-        job.init(this.platform, this.sampleCollector, this.threadDumper, window, this.background, this.forceNanoTime);
+        job.init(this.platform, this.sampleCollector, ImmutableList.copyOf(this.extraAggregators.keySet()), this.threadDumper, window, this.background, this.forceNanoTime);
         job.start();
         this.windowStatisticsCollector.recordWindowStartTime(window);
         this.currentJob = job;
 
         // rotate the sampler job to put data into a new window
         boolean shouldNotRotate = this.sampleCollector instanceof SampleCollector.Allocation && ((SampleCollector.Allocation) this.sampleCollector).isLiveOnly();
+
+        // fork - window rotation stops and restarts async-profiler, which throws away the
+        // in-flight malloc->free correlation and the live-object set. For leak detection that
+        // is fatal: a leak is by definition an allocation that outlives the window it was made
+        // in, so rotating every 60s would report almost everything as leaked and simultaneously
+        // lose the long-lived allocations that actually matter. Leak modes therefore run as one
+        // continuous recording, exactly as upstream already does for --alloc-live-only.
+        for (SampleCollector<?> extra : this.extraAggregators.keySet()) {
+            if (extra instanceof SampleCollector.NativeMemory) {
+                shouldNotRotate = true;
+            }
+            if (extra instanceof SampleCollector.Allocation && ((SampleCollector.Allocation) extra).isLiveOnly()) {
+                shouldNotRotate = true;
+            }
+        }
         if (!shouldNotRotate) {
             this.scheduler.scheduleAtFixedRate(
                     this::rotateProfilerJob,
@@ -153,7 +200,7 @@ public class AsyncSampler extends AbstractSampler {
                 }
 
                 // aggregate the output of the previous job
-                previousJob.aggregate(this.dataAggregator);
+                previousJob.aggregate(this.dataAggregator, this.extraAggregators); // fork
 
                 // prune data older than the history size
                 IntPredicate predicate = ProfilingWindowUtils.keepHistoryBefore(window);
@@ -221,7 +268,7 @@ public class AsyncSampler extends AbstractSampler {
             this.currentJob.stop();
             if (!cancelled) {
                 this.windowStatisticsCollector.measureNow(this.currentJob.getWindow());
-                this.currentJob.aggregate(this.dataAggregator);
+                this.currentJob.aggregate(this.dataAggregator, this.extraAggregators); // fork
             } else {
                 this.currentJob.deleteOutputFile();
             }
@@ -271,7 +318,42 @@ public class AsyncSampler extends AbstractSampler {
         }
         writeMetadataToProto(proto, platform, exportProps.creator(), exportProps.comment(), this.dataAggregator);
         writeDataToProto(proto, this.dataAggregator, AsyncNodeExporter::new, exportProps.classSourceLookup().get(), platform::createClassFinder);
+        writeExtendedDataToProto(proto); // fork
         return proto.build();
+    }
+
+    /**
+     * fork - writes the extra leak trees and a summary of what this profile actually contains.
+     *
+     * <p>The summary matters as much as the data. Without it a reader cannot distinguish "native
+     * memory profiling ran and found nothing" from "native memory profiling was never enabled",
+     * and reporting a clean bill of health for a profile that never looked would be worse than
+     * reporting nothing at all.</p>
+     */
+    private void writeExtendedDataToProto(SamplerData.Builder proto) {
+        SparkSamplerProtos.ExtendedProfileContents.Builder contents = SparkSamplerProtos.ExtendedProfileContents.newBuilder()
+                .setHasExecution(true)
+                .setLeakTailRatio(AsyncProfilerJob.LEAK_TAIL_RATIO)
+                .setForkVersion(FORK_VERSION);
+
+        long duration = this.startTime == -1 ? 0 : System.currentTimeMillis() - this.startTime;
+        contents.setDurationMillis(duration);
+
+        for (Map.Entry<SampleCollector<?>, AsyncDataAggregator> entry : this.extraAggregators.entrySet()) {
+            SampleCollector<?> collector = entry.getKey();
+
+            if (collector instanceof SampleCollector.NativeMemory) {
+                long total = writeExtraDataToProto(entry.getValue(), AsyncNodeExporter::new, proto::addNativeMemoryThreads);
+                contents.setHasNativeMemory(true);
+                contents.setNativeMemoryLeakedBytes(total);
+            } else if (collector instanceof SampleCollector.Allocation) {
+                long total = writeExtraDataToProto(entry.getValue(), AsyncNodeExporter::new, proto::addHeapLeakThreads);
+                contents.setHasHeapLeak(true);
+                contents.setHeapLeakedBytes(total);
+            }
+        }
+
+        proto.setExtendedContents(contents);
     }
 
 }

@@ -147,6 +147,39 @@ public class AsyncProfilerAccess {
         return supported;
     }
 
+    // fork - native memory leak profiling support
+    //
+    // Unlike 'wall' and 'alloc', native memory profiling is NOT an 'event=' value - it is a
+    // separate additive engine enabled by the standalone 'nativemem' argument, so it does not
+    // appear in the profiler's own event list and cannot be feature-detected the same way.
+    // It was introduced in async-profiler 4.0 and stabilised in 4.1, so the version string is
+    // the honest check. It also relies on GOT/PLT patching of malloc/free, which is implemented
+    // for Linux and macOS only - Windows never gets this far anyway, since async-profiler
+    // itself is unsupported there and spark falls back to the Java engine.
+    public boolean checkNativeMemoryProfilingSupported(SparkPlatform platform) {
+        if (this.profiler == null) {
+            return false;
+        }
+
+        boolean supported;
+        try {
+            supported = parseMajorVersion(this.profiler.getVersion()) >= 4;
+        } catch (Exception e) {
+            supported = false;
+        }
+
+        if (!supported) {
+            platform.getPlugin().log(Level.WARNING, "Native memory leak profiling requires async-profiler 4.0 or newer.");
+        }
+        return supported;
+    }
+
+    private static int parseMajorVersion(String version) {
+        // version strings look like "4.5" or "async-profiler 4.5 built on ..."
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d+)\\.(\\d+)").matcher(version);
+        return m.find() ? Integer.parseInt(m.group(1)) : -1;
+    }
+
     public String getVersion() {
         return this.profiler.getVersion();
     }

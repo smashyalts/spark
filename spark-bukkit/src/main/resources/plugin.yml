@@ -1,8 +1,8 @@
 name: spark
 version: ${pluginVersion}
 description: ${pluginDescription}
-author: Luck
-website: https://spark.lucko.me/
+authors: [Luck, smashyalts]
+website: https://github.com/smashyalts/spark
 main: me.lucko.spark.bukkit.BukkitSparkPlugin
 
 # Mark the plugin as 1.13 compatible to avoid CB having to perform quite as much unnecessary

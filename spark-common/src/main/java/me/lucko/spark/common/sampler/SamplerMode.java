@@ -42,6 +42,21 @@ public enum SamplerMode {
             },
             524287, // 512 KiB
             SamplerMetadata.SamplerMode.ALLOCATION
+    ),
+
+    // fork - native (off-heap) memory leak profiling.
+    // The value is bytes of *unfreed* native memory, so like ALLOCATION it passes through
+    // untransformed. Default interval is 0, meaning every malloc is recorded: leaks are
+    // frequently many small allocations rather than a few big ones, and a sampling interval
+    // would silently drop exactly that shape (async-profiler's own tests show ~2MB
+    // allocations vanishing entirely at a 10MB interval).
+    NATIVE_MEMORY(
+            value -> {
+                // do nothing - already bytes
+                return value;
+            },
+            0, // record every malloc
+            SamplerMetadata.SamplerMode.NATIVE_MEMORY
     );
 
     private final LongToDoubleFunction valueTransformer;

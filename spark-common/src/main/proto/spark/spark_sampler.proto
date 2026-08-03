@@ -16,6 +16,45 @@ message SamplerData {
   repeated int32 time_windows = 6;
   map<int32, WindowStatistics> time_window_statistics = 7;
   SocketChannelInfo channel_info = 8;
+
+  // fork - additional profiling trees captured in the same recording.
+  //
+  // These live in a high, fenced field band ON PURPOSE. Upstream spark numbers fields
+  // sequentially and is currently at 8, so anything low would eventually collide on a rebase.
+  // Field numbers <= 2047 still encode as a 2-byte tag, so the cost is negligible against a
+  // gzipped multi-MB profile.
+  //
+  // Because proto3 parsers silently ignore (and preserve) unknown fields, a profile carrying
+  // these still renders correctly in the stock spark viewer - it just shows the execution
+  // profile in 'threads' and never knows the rest is there. That is what lets this fork keep
+  // using the standard 'application/x-spark-sampler' content type and a single share link.
+  reserved 1000 to 1099; // fork reserved band - do not use for upstream merges
+
+  // Native (off-heap) memory that was allocated and never freed, in bytes.
+  repeated ThreadNode native_memory_threads = 1100;
+  // Java heap objects that survived garbage collection, in bytes.
+  repeated ThreadNode heap_leak_threads = 1101;
+  // Which of the above trees are actually populated in this profile.
+  ExtendedProfileContents extended_contents = 1102;
+}
+
+// fork - describes which extra trees a profile carries, so a reader can tell
+// "this mode was not enabled" apart from "this mode ran and found nothing".
+// Without this the two are indistinguishable, and reporting "no leaks found" for a
+// profile that never profiled memory would be actively misleading.
+message ExtendedProfileContents {
+  bool has_execution = 1;
+  bool has_native_memory = 2;
+  bool has_heap_leak = 3;
+  // total bytes of unfreed native memory across all threads
+  int64 native_memory_leaked_bytes = 4;
+  // total bytes of retained heap across all threads
+  int64 heap_leaked_bytes = 5;
+  // how long the recording ran - a leak total is meaningless without it
+  int64 duration_millis = 6;
+  // fraction of the recording discarded as "too recent to call a leak"
+  double leak_tail_ratio = 7;
+  string fork_version = 8;
 }
 
 message SamplerMetadata {
@@ -70,6 +109,9 @@ message SamplerMetadata {
   enum SamplerMode {
     EXECUTION = 0;
     ALLOCATION = 1;
+    // fork - high values so upstream can keep taking 2, 3, ... without colliding
+    NATIVE_MEMORY = 100;
+    COMBINED = 101;
   }
 
   enum SamplerEngine {

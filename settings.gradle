@@ -22,17 +22,15 @@ plugins {
 }
 
 rootProject.name = 'spark'
+// fork - scoped to the Bukkit/Paper family.
+// The Fabric/Forge/NeoForge/Sponge modules drag in the full Minecraft modding toolchain
+// (Forge's Mavenizer, mapping downloads, userdev artifacts) which is both slow and unnecessary
+// for a fork targeting Paper servers. Dropping them from the build does not touch their source,
+// so they can be re-enabled by restoring the lines below.
 include (
         'spark-api',
         'spark-bukkit',
-        'spark-bungeecord',
         'spark-common',
-        'spark-fabric',
-        'spark-forge',
-        'spark-minecraft',
-        'spark-neoforge',
         'spark-paper',
-        'spark-sponge',
-        'spark-standalone-agent',
         'spark-velocity',
 )
