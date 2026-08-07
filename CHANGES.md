@@ -95,6 +95,10 @@ unchanged.
   allocation that outlives the window it was made in. Upstream already does this for
   `--alloc-live-only`; this fork extends the same rule.
 - Writes the extra trees and an `ExtendedProfileContents` summary.
+- Added `isHeapLeakCollector`, used by both the rotation check and the proto export.
+  `SampleCollector.HeapLeak` is a sibling of `SampleCollector.Allocation`, not a
+  subclass, so the `instanceof Allocation` tests these two sites originally used never
+  matched the collector `--heap-leaks` actually registers.
 
 ### `spark-common/.../sampler/AbstractSampler.java`
 - Added `writeExtraDataToProto`. Kept separate from `writeDataToProto` because that

@@ -149,10 +149,7 @@ public class AsyncSampler extends AbstractSampler {
         // lose the long-lived allocations that actually matter. Leak modes therefore run as one
         // continuous recording, exactly as upstream already does for --alloc-live-only.
         for (SampleCollector<?> extra : this.extraAggregators.keySet()) {
-            if (extra instanceof SampleCollector.NativeMemory) {
-                shouldNotRotate = true;
-            }
-            if (extra instanceof SampleCollector.Allocation && ((SampleCollector.Allocation) extra).isLiveOnly()) {
+            if (extra instanceof SampleCollector.NativeMemory || isHeapLeakCollector(extra)) {
                 shouldNotRotate = true;
             }
         }
@@ -346,7 +343,7 @@ public class AsyncSampler extends AbstractSampler {
                 long total = writeExtraDataToProto(entry.getValue(), AsyncNodeExporter::new, proto::addNativeMemoryThreads);
                 contents.setHasNativeMemory(true);
                 contents.setNativeMemoryLeakedBytes(total);
-            } else if (collector instanceof SampleCollector.Allocation) {
+            } else if (isHeapLeakCollector(collector)) {
                 long total = writeExtraDataToProto(entry.getValue(), AsyncNodeExporter::new, proto::addHeapLeakThreads);
                 contents.setHasHeapLeak(true);
                 contents.setHeapLeakedBytes(total);
@@ -354,6 +351,28 @@ public class AsyncSampler extends AbstractSampler {
         }
 
         proto.setExtendedContents(contents);
+    }
+
+    /**
+     * fork - identifies a collector whose data belongs in the heap-leak trees.
+     *
+     * <p>This is a named helper rather than an inline {@code instanceof} because getting it
+     * wrong is silent. {@link SampleCollector.HeapLeak} is a sibling of
+     * {@link SampleCollector.Allocation}, not a subclass of it - they read different JFR event
+     * streams ({@code profiler.LiveObject} vs {@code jdk.ObjectAllocationInNewTLAB}), so making
+     * one extend the other would inherit the wrong {@link SampleCollector#eventClass()}. An
+     * {@code instanceof Allocation} test therefore never matches the collector that
+     * {@code --heap-leaks} actually registers, and the failure mode is a profile that uploads
+     * successfully with {@code has_heap_leak = false} - indistinguishable, to any reader, from a
+     * run where heap leak detection was never switched on.</p>
+     *
+     * <p>Live-only {@link SampleCollector.Allocation} is included because it is the same
+     * question asked through the older flag: {@code alloc} plus {@code live} is retention, not
+     * allocation rate.</p>
+     */
+    static boolean isHeapLeakCollector(SampleCollector<?> collector) {
+        return collector instanceof SampleCollector.HeapLeak
+                || (collector instanceof SampleCollector.Allocation && ((SampleCollector.Allocation) collector).isLiveOnly());
     }
 
 }
