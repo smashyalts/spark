@@ -124,11 +124,58 @@ unchanged.
   points `website` at the fork repo.
 
 ### `settings.gradle`
-- Build scoped to `spark-api`, `spark-common`, `spark-bukkit`, `spark-paper`. The
-  Fabric/Forge/NeoForge/Sponge/BungeeCord/Velocity modules are excluded from the
-  build because they drag in the full Minecraft modding toolchain and are not needed
-  for a Paper-targeted fork. **Their source is untouched** and they can be re-enabled
-  by restoring the lines.
+- Build scoped to `spark-api`, `spark-common`, `spark-bukkit`, `spark-paper`,
+  `spark-velocity` and `spark-geyser`. The Fabric/Forge/NeoForge/Sponge/BungeeCord
+  modules are excluded from the build because they drag in the full Minecraft modding
+  toolchain and are not needed here. **Their source is untouched** and they can be
+  re-enabled by restoring the lines.
+
+---
+
+## New files
+
+Date of changes: 2026-08-07
+
+### `spark-geyser/` (new module)
+A Geyser platform module, implemented as a **Geyser extension**. Upstream spark has no
+Geyser support at all, so on Geyser Standalone — where Geyser is its own JVM process
+rather than a plugin inside a server — there was previously no way to profile the
+process from the inside. This module adds one, which matters most for the native
+memory work this fork exists for: Geyser Standalone is a long-lived proxy process that
+does heavy protocol translation through Netty, exactly the shape of workload where
+off-heap growth shows up and the Java heap graph stays flat.
+
+- `GeyserSparkPlugin.java` — implements both Geyser's `Extension` and spark's
+  `SparkPlugin`. Enables the platform on `GeyserPreInitializeEvent`, registers each of
+  spark's own top-level commands as a Geyser extension command on
+  `GeyserDefineCommandsEvent` (so `/spark profiler start --leaks` works as it does
+  everywhere else, rather than a single catch-all subcommand), declares spark's
+  permission nodes on `GeyserRegisterPermissionsEvent` so Geyser Standalone's
+  permissions file can actually grant them, and tears down on `GeyserShutdownEvent`.
+  Async work runs on a daemon thread pool owned by the extension, since the Geyser API
+  exposes no scheduler.
+- `GeyserSparkCommandSender.java` — Geyser's `CommandSource#sendMessage` takes a
+  `String`, not an Adventure `Component`, so output is serialized here: ANSI for
+  console, legacy section codes for Bedrock players.
+- `GeyserPlatformInfo.java` — reports type `PROXY`, brand `Geyser (<platform>)` so the
+  profile records which flavour of Geyser produced it, and reads the Geyser version
+  reflectively from `GeyserImpl.VERSION` (it is not exposed on the extension API).
+- `GeyserPlayerPingProvider.java` — Bedrock-side RakNet ping per connection.
+- `GeyserClassSourceLookup.java` — attributes sampled classes to the Geyser extension
+  that loaded them, via each extension's own classloader.
+- `extension.yml`, `build.gradle` — Java 21 target (current Geyser requires it, unlike
+  spark's Java 8 baseline); guava and Adventure are shaded and relocated because Geyser
+  makes no guarantee about exposing its own copies to extension classloaders.
+
+No tick hook or tick reporter is provided, because Geyser has no tick loop — so
+`/spark tps` reports nothing, the same as on the Velocity and BungeeCord modules.
+Everything else, including `--leaks`, `--native-leaks` and `--heap-leaks`, works.
+
+Verified by loading the built jar into Geyser Standalone 2.11.1-b1209: the extension
+enables, `/spark` lists its subcommands, `/spark health` and `/spark gc` return real
+data, and `/spark profiler start --leaks` produces a profile that decodes as
+`Platform: Geyser 2.11.1-b1209 / Profiler: spark + native-memory fork` carrying native
+memory leak trees.
 
 ---
 

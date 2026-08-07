@@ -79,12 +79,29 @@ needs a consumer that understands the extended schema; field numbers are in `CHA
 ## Building
 
 ```bash
-./gradlew :spark-bukkit:build
+./gradlew :spark-bukkit:build      # Bukkit/Paper plugin
+./gradlew :spark-velocity:build    # Velocity plugin
+./gradlew :spark-geyser:build      # Geyser extension
 ```
 
-Requires JDK 21. Output is `spark-<version>-bukkit.jar` — **use the bukkit jar**, on
-Paper too. The `spark-paper` module is the library Paper bundles inside the server jar
-and has no `plugin.yml`; it is not a drop-in plugin.
+Requires JDK 21. For Bukkit the output is `spark-<version>-bukkit.jar` — **use the
+bukkit jar**, on Paper too. The `spark-paper` module is the library Paper bundles
+inside the server jar and has no `plugin.yml`; it is not a drop-in plugin.
+
+### Geyser
+
+`spark-<version>-geyser.jar` is a **Geyser extension**, not a plugin — drop it in
+Geyser's `extensions/` folder. It works on Geyser Standalone as well as Geyser running
+as a plugin/mod on another platform, and on Standalone it is the only way to profile
+the Geyser process from the inside.
+
+Commands are namespaced under Geyser's extension root, so it is `/spark profiler start
+--leaks` exactly as elsewhere. Geyser has no tick loop, so `/spark tps` reports nothing
+(as on Velocity and BungeeCord); everything else, including all three leak modes, works.
+
+Requires Geyser API 2.9.0+ (built against 2.11.1). Geyser logs a warning that the
+extension "loads class one.profiler.Recording from an external source" — that is
+async-profiler's JNI helper being loaded by spark, and is expected.
 
 ## Licence
 

@@ -1,0 +1,10 @@
+id: spark
+name: spark
+main: me.lucko.spark.geyser.GeyserSparkPlugin
+# Geyser extension API floor. Compiled against 2.11.1; only long-stable API is
+# used, so older Geyser builds down to this version can still load the extension.
+api: 2.9.0
+version: ${pluginVersion}
+authors:
+  - Luck
+  - smashyalts

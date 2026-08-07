@@ -31,6 +31,7 @@ include (
         'spark-api',
         'spark-bukkit',
         'spark-common',
+        'spark-geyser',
         'spark-paper',
         'spark-velocity',
 )

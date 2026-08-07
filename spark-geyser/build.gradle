@@ -1,0 +1,71 @@
+plugins {
+    id 'com.gradleup.shadow'
+}
+
+dependencies {
+    implementation project(':spark-common')
+
+    // Geyser's extension API. compileOnly - it is provided by the Geyser runtime.
+    compileOnly 'org.geysermc.geyser:api:2.11.1-SNAPSHOT'
+
+    // Console output is serialized to ANSI, same as the standalone agent.
+    implementation('net.kyori:adventure-text-serializer-ansi:4.21.0') {
+        exclude(module: 'adventure-bom')
+        exclude(module: 'adventure-api')
+        exclude(module: 'annotations')
+    }
+
+    // spark-common uses guava at runtime and Geyser makes no guarantee about
+    // exposing its own copy to extension classloaders, so bundle (and relocate) it.
+    implementation('com.google.guava:guava:31.1-jre') {
+        exclude(module: 'jsr305')
+        exclude(module: 'error_prone_annotations')
+        exclude(module: 'failureaccess')
+        exclude(module: 'listenablefuture')
+        exclude(module: 'j2objc-annotations')
+        exclude(module: 'checker-qual')
+    }
+    implementation 'com.google.code.gson:gson:2.9.0'
+}
+
+repositories {
+    maven { url "https://repo.opencollab.dev/main/" }
+}
+
+processResources {
+    from(sourceSets.main.resources.srcDirs) {
+        expand (
+                'pluginVersion': project.pluginVersion
+        )
+        include 'extension.yml'
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    // Current Geyser targets Java 21, unlike the Java 8 baseline used elsewhere in spark.
+    options.release = 21
+}
+
+shadowJar {
+    archiveFileName = "spark-${project.pluginVersion}-geyser.jar"
+
+    relocate 'net.kyori.adventure', 'me.lucko.spark.lib.adventure'
+    relocate 'net.kyori.examination', 'me.lucko.spark.lib.adventure.examination'
+    relocate 'net.kyori.option', 'me.lucko.spark.lib.adventure.option'
+    relocate 'net.kyori.ansi', 'me.lucko.spark.lib.adventure.ansi'
+    relocate 'net.bytebuddy', 'me.lucko.spark.lib.bytebuddy'
+    relocate 'com.google.protobuf', 'me.lucko.spark.lib.protobuf'
+    relocate 'org.objectweb.asm', 'me.lucko.spark.lib.asm'
+    relocate 'one.profiler', 'me.lucko.spark.lib.asyncprofiler'
+    relocate 'me.lucko.bytesocks.client', 'me.lucko.spark.lib.bytesocks'
+    relocate 'org.java_websocket', 'me.lucko.spark.lib.bytesocks.ws'
+    relocate 'com.google.gson', 'me.lucko.spark.lib.gson'
+    relocate 'com.google.common', 'me.lucko.spark.lib.guava'
+    relocate 'com.google.thirdparty', 'me.lucko.spark.lib.google.thirdparty'
+
+    project.applyExcludes(delegate)
+}
+
+artifacts {
+    archives shadowJar
+}
