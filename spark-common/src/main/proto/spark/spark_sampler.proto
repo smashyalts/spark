@@ -36,6 +36,68 @@ message SamplerData {
   repeated ThreadNode heap_leak_threads = 1101;
   // Which of the above trees are actually populated in this profile.
   ExtendedProfileContents extended_contents = 1102;
+
+  // Process-level memory accounting captured at export time.
+  //
+  // Attached to EVERY profile this fork exports, not only memory ones, because it is the
+  // context that makes a leak number interpretable. A native memory tree showing 600 KB of
+  // unfreed mallocs means one thing when the process is 2 GB resident and entirely another
+  // when it is 60 GB resident with 20 GB the JVM cannot account for - and the tree alone
+  // cannot distinguish those. Capturing it costs a few /proc reads and some MX bean calls.
+  ProcessMemoryData process_memory = 1103;
+}
+
+// fork - the kernel's and the JVM's views of this process's memory, side by side.
+message ProcessMemoryData {
+  int64 timestamp = 1;
+
+  // kernel view - resident set size EXCLUDES page cache, unlike a container's memory.current
+  int64 rss = 2;
+  int64 swap = 3;
+  map<string, int64> smaps_rollup = 4;
+  map<string, int64> cgroup = 5;
+
+  // JVM view
+  int64 heap_used = 6;
+  int64 heap_committed = 7;
+  int64 heap_max = 8;
+  int64 non_heap_committed = 9;
+  map<string, int64> non_heap_pools = 10;
+  int64 nio_direct_used = 11;
+  int64 nio_direct_count = 12;
+  int64 nio_mapped_used = 13;
+  int64 netty_direct = 14;
+  int64 netty_max_direct = 15;
+  int32 threads = 16;
+  int32 peak_threads = 17;
+  int64 thread_stack_size = 18;
+  int64 loaded_classes = 19;
+
+  // rss minus everything nameable above. NOT a leak figure on its own - only its growth is.
+  int64 unaccounted = 20;
+
+  // configuration that changes how the numbers should be read
+  bool always_pre_touch = 21;
+  string max_direct_memory_size = 22;
+  string malloc_arena_max = 23;
+  int32 available_processors = 24;
+
+  // populated only when explicitly requested - reading smaps is not free
+  int32 arena_like_regions = 25;
+  repeated MemoryMapping largest_mappings = 26;
+  int32 total_mappings = 27;
+
+  // Native Memory Tracking, when the JVM was started with it
+  bool nmt_enabled = 28;
+  string nmt_summary = 29;
+}
+
+// fork - one entry from /proc/self/smaps.
+message MemoryMapping {
+  int64 size = 1;
+  int64 rss = 2;
+  string permissions = 3;
+  string path = 4;
 }
 
 // fork - describes which extra trees a profile carries, so a reader can tell
@@ -55,6 +117,10 @@ message ExtendedProfileContents {
   // fraction of the recording discarded as "too recent to call a leak"
   double leak_tail_ratio = 7;
   string fork_version = 8;
+  // whether process-level memory accounting is attached
+  bool has_process_memory = 9;
+  // true when this upload carries ONLY memory accounting, with no sampled trees at all
+  bool memory_accounting_only = 10;
 }
 
 message SamplerMetadata {

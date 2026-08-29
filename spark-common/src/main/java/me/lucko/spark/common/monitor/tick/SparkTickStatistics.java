@@ -70,7 +70,7 @@ public class SparkTickStatistics implements TickHook.Callback, TickReporter.Call
     }
 
     @Override
-    public void onTick(int currentTick) {
+    public synchronized void onTick(int currentTick) { // fork - guards 'last' against region threads
         if (currentTick % TPS_SAMPLE_INTERVAL != 0) {
             return;
         }
@@ -198,7 +198,13 @@ public class SparkTickStatistics implements TickHook.Callback, TickReporter.Call
             }
         }
 
-        public void add(BigDecimal x, long t, BigDecimal total) {
+        // fork - synchronized because a regionised server (Folia, Canvas) fires the tick events
+        // from every region thread at once. The index update below is a read-modify-write, so
+        // concurrent callers push it past the array length: "Index 8 out of bounds for length 5"
+        // thrown straight out of the event handler. SingleTickSource should mean only one thread
+        // ever gets here, but the handover window between owners is still a race, and corrupting
+        // a statistics buffer is not worth saving an uncontended lock on a once-per-tick path.
+        public synchronized void add(BigDecimal x, long t, BigDecimal total) {
             this.time -= this.times[this.index];
             this.total = this.total.subtract(this.samples[this.index].multiply(new BigDecimal(this.times[this.index])));
             this.samples[this.index] = x;
@@ -210,7 +216,7 @@ public class SparkTickStatistics implements TickHook.Callback, TickReporter.Call
             }
         }
 
-        public double getAverage() {
+        public synchronized double getAverage() {
             return this.total.divide(new BigDecimal(this.time), 30, RoundingMode.HALF_UP).doubleValue();
         }
     }

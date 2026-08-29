@@ -26,18 +26,25 @@ import java.util.concurrent.CopyOnWriteArraySet;
 public abstract class AbstractTickHook implements TickHook {
 
     private final Set<Callback> tasks = new CopyOnWriteArraySet<>();
-    private int tick = 0;
+    // fork - AtomicInteger, and gated on a single reporting thread: on a regionised server every
+    // region fires the tick event, so both the counter increment and the downstream statistics
+    // would otherwise be racing, and the tick count would advance once per region per tick.
+    private final java.util.concurrent.atomic.AtomicInteger tick = new java.util.concurrent.atomic.AtomicInteger();
+    private final SingleTickSource source = new SingleTickSource();
 
     protected void onTick() {
-        for (Callback r : this.tasks) {
-            r.onTick(this.tick);
+        if (!this.source.accept()) {
+            return;
         }
-        this.tick++;
+        int current = this.tick.getAndIncrement();
+        for (Callback r : this.tasks) {
+            r.onTick(current);
+        }
     }
 
     @Override
     public int getCurrentTick() {
-        return this.tick;
+        return this.tick.get();
     }
 
     @Override

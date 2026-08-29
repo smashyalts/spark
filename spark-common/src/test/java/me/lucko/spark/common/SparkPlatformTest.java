@@ -62,6 +62,7 @@ public class SparkPlatformTest {
                             "spark.gcmonitor",
                             "spark.heapsummary",
                             "spark.heapdump",
+                            "spark.offheap", // fork
                             "spark.activity"
                     ),
                     permissions

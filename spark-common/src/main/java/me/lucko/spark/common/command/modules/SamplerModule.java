@@ -44,7 +44,6 @@ import me.lucko.spark.common.util.FormatUtil;
 import me.lucko.spark.common.util.MediaTypes;
 import me.lucko.spark.common.util.TimeUtil;
 import me.lucko.spark.common.ws.SamplerViewerSocket;
-import me.lucko.spark.common.ws.ViewerSocket;
 import me.lucko.spark.proto.SparkSamplerProtos;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
@@ -381,7 +380,7 @@ public class SamplerModule implements CommandModule {
             if (success) {
                 Sampler sampler = platform.getSamplerContainer().getActiveSampler();
                 if (sampler != null) {
-                    for (ViewerSocket socket : sampler.getAttachedSockets()) {
+                    for (SamplerViewerSocket socket : sampler.getAttachedSockets()) {
                         socket.sendClientTrustedMessage(id);
                     }
                 }

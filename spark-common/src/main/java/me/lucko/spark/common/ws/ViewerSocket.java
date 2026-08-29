@@ -24,6 +24,7 @@ import com.google.protobuf.ByteString;
 import me.lucko.bytesocks.client.BytesocksClient;
 import me.lucko.spark.common.SparkPlatform;
 import me.lucko.spark.common.sampler.window.ProfilingWindowUtils;
+import me.lucko.spark.common.util.MediaTypes;
 import me.lucko.spark.common.util.TimeUtil;
 import me.lucko.spark.proto.SparkProtos;
 import me.lucko.spark.proto.SparkWebSocketProtos.ClientConnect;

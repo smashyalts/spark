@@ -21,6 +21,7 @@
 package me.lucko.spark.common.sampler.async;
 
 import me.lucko.spark.common.SparkPlatform;
+import me.lucko.spark.common.monitor.memory.ProcessMemorySnapshot; // fork
 import me.lucko.spark.common.platform.PlatformInfo;
 import me.lucko.spark.common.sampler.AbstractSampler;
 import me.lucko.spark.common.sampler.SamplerMode;
@@ -336,6 +337,22 @@ public class AsyncSampler extends AbstractSampler {
 
         long duration = this.startTime == -1 ? 0 : System.currentTimeMillis() - this.startTime;
         contents.setDurationMillis(duration);
+
+        // fork - process-level memory accounting on every export, memory profile or not.
+        // Cheap (no smaps parse), and it is what makes a leak total interpretable: the same
+        // number means something completely different depending on how much of the process's
+        // resident memory the JVM can already account for.
+        // fork - guarded. This runs on EVERY profile export, including plain CPU profiles that
+        // have nothing to do with memory, so a failure here must cost the memory section and
+        // nothing else. Losing an hour-long profiling run because /proc looked unfamiliar, or an
+        // MBean behaved oddly on an unusual JVM, would be a far worse outcome than the missing
+        // accounting - and the analysis side already handles its absence.
+        try {
+            proto.setProcessMemory(ProcessMemorySnapshot.capture().toProto());
+            contents.setHasProcessMemory(true);
+        } catch (Throwable t) {
+            this.platform.getPlugin().log(Level.WARNING, "Unable to capture process memory accounting", t);
+        }
 
         for (Map.Entry<SampleCollector<?>, AsyncDataAggregator> entry : this.extraAggregators.entrySet()) {
             SampleCollector<?> collector = entry.getKey();

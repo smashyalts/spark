@@ -26,6 +26,7 @@ import me.lucko.spark.common.SparkPlugin;
 import me.lucko.spark.common.command.modules.ActivityLogModule;
 import me.lucko.spark.common.command.modules.GcMonitoringModule;
 import me.lucko.spark.common.command.modules.HealthModule;
+import me.lucko.spark.common.command.modules.NativeMemoryModule; // fork
 import me.lucko.spark.common.command.modules.HeapAnalysisModule;
 import me.lucko.spark.common.command.modules.SamplerModule;
 import me.lucko.spark.common.command.modules.TickMonitoringModule;
@@ -80,6 +81,7 @@ public class CommandManager implements AutoCloseable {
         }
         this.modules.add(new GcMonitoringModule());
         this.modules.add(new HeapAnalysisModule());
+        this.modules.add(new NativeMemoryModule()); // fork
         this.modules.add(new ActivityLogModule());
 
         ImmutableList.Builder<Command> commandsBuilder = ImmutableList.builder();

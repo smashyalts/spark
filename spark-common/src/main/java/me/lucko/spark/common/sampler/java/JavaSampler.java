@@ -21,6 +21,8 @@
 package me.lucko.spark.common.sampler.java;
 
 import me.lucko.spark.common.SparkPlatform;
+import me.lucko.spark.common.monitor.memory.ProcessMemorySnapshot; // fork
+import me.lucko.spark.proto.SparkSamplerProtos; // fork
 import me.lucko.spark.common.sampler.AbstractSampler;
 import me.lucko.spark.common.sampler.SamplerMode;
 import me.lucko.spark.common.sampler.SamplerSettings;
@@ -39,6 +41,7 @@ import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.logging.Level;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -193,6 +196,23 @@ public class JavaSampler extends AbstractSampler implements Runnable {
 
         MethodDisambiguator methodDisambiguator = new MethodDisambiguator(platform.createClassFinder());
         writeDataToProto(proto, this.dataAggregator, timeEncoder -> new JavaNodeExporter(timeEncoder, exportProps.mergeStrategy(), methodDisambiguator), exportProps.classSourceLookup().get(), platform::createClassFinder);
+
+        // fork - process memory accounting, same as AsyncSampler. The Java engine cannot do leak
+        // detection, but the accounting is engine-independent and equally worth having here.
+        // fork - guarded, same reasoning as AsyncSampler: the accounting is a bonus on top of the
+        // profile, so it must never be able to cost the profile itself.
+        boolean capturedMemory = false;
+        try {
+            proto.setProcessMemory(ProcessMemorySnapshot.capture().toProto());
+            capturedMemory = true;
+        } catch (Throwable t) {
+            platform.getPlugin().log(Level.WARNING, "Unable to capture process memory accounting", t);
+        }
+        proto.setExtendedContents(SparkSamplerProtos.ExtendedProfileContents.newBuilder()
+                .setHasExecution(true)
+                .setHasProcessMemory(capturedMemory)
+                .setForkVersion(me.lucko.spark.common.sampler.async.AsyncSampler.FORK_VERSION)
+                .build());
 
         return proto.build();
     }

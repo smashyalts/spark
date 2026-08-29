@@ -23,14 +23,15 @@ package me.lucko.spark.bukkit;
 import me.lucko.spark.common.tick.AbstractTickHook;
 import me.lucko.spark.common.tick.TickHook;
 import org.bukkit.plugin.Plugin;
-import org.bukkit.scheduler.BukkitTask;
 
 public class BukkitTickHook extends AbstractTickHook implements TickHook, Runnable {
     private final Plugin plugin;
-    private BukkitTask task;
+    private final SparkScheduler scheduler; // fork
+    private SparkScheduler.Task task;
 
     public BukkitTickHook(Plugin plugin) {
         this.plugin = plugin;
+        this.scheduler = SparkScheduler.create(plugin); // fork
     }
 
     @Override
@@ -40,12 +41,16 @@ public class BukkitTickHook extends AbstractTickHook implements TickHook, Runnab
 
     @Override
     public void start() {
-        this.task = this.plugin.getServer().getScheduler().runTaskTimer(this.plugin, this, 1, 1);
+        // fork - on Folia this runs on the global region, which still ticks at 20 TPS even
+        // though individual world regions tick independently.
+        this.task = this.scheduler.scheduleRepeating(this, 1, 1);
     }
 
     @Override
     public void close() {
-        this.task.cancel();
+        if (this.task != null) {
+            this.task.cancel();
+        }
     }
 
 }

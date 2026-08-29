@@ -25,8 +25,15 @@ import java.util.concurrent.CopyOnWriteArraySet;
 
 public abstract class AbstractTickReporter implements TickReporter {
     private final Set<Callback> tasks = new CopyOnWriteArraySet<>();
+    // fork - see SingleTickSource. Tick DURATIONS are reported per region too, and mixing several
+    // regions' durations into one rolling average produces a figure that describes no region in
+    // particular - and drives the tick-duration threshold that --only-ticks-over relies on.
+    private final SingleTickSource source = new SingleTickSource();
 
     protected void onTick(double duration) {
+        if (!this.source.accept()) {
+            return;
+        }
         for (Callback r : this.tasks) {
             r.onTick(duration);
         }
