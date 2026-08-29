@@ -168,6 +168,46 @@ public final class OffHeapInvestigation {
         }
         out.add("");
 
+        // Per-arena growth is the only attribution available without hooking malloc. glibc binds
+        // a thread to an arena and keeps it there, so concentrated growth means a small set of
+        // threads, not the whole process.
+        out.add("--- Per-arena growth (glibc binds threads to arenas) ---");
+        Map<Integer, long[]> before = first.arenas.perArena();
+        Map<Integer, long[]> after = last.arenas.perArena();
+        List<int[]> ranked = new ArrayList<>();
+        for (Map.Entry<Integer, long[]> e : after.entrySet()) {
+            long[] b = before.get(e.getKey());
+            long grew = e.getValue()[0] - (b == null ? 0 : b[0]);
+            ranked.add(new int[]{e.getKey(), (int) (grew / (1024 * 1024))});
+        }
+        ranked.sort((x, y) -> Integer.compare(y[1], x[1]));
+        long totalArenaGrowthMb = 0;
+        for (int[] r : ranked) {
+            totalArenaGrowthMb += Math.max(0, r[1]);
+        }
+        for (int i = 0; i < Math.min(8, ranked.size()); i++) {
+            int nr = ranked.get(i)[0];
+            int mb = ranked.get(i)[1];
+            long[] cur = after.get(nr);
+            double pct = totalArenaGrowthMb > 0 ? (100.0 * Math.max(0, mb) / totalArenaGrowthMb) : 0;
+            out.add(String.format("  arena %-3d  +%-8s (%4.0f%% of growth)  now %s, %.0f%% free, %d subheaps",
+                    nr, FormatUtil.formatBytes(mb * 1024L * 1024L), pct,
+                    FormatUtil.formatBytes(cur[0]),
+                    cur[0] > 0 ? (100.0 * cur[1] / cur[0]) : 0, cur[2]));
+        }
+        if (!ranked.isEmpty() && totalArenaGrowthMb > 0) {
+            double topShare = 100.0 * Math.max(0, ranked.get(0)[1]) / totalArenaGrowthMb;
+            if (topShare > 60) {
+                out.add(String.format("  Growth is CONCENTRATED in arena %d (%.0f%%). The leak belongs to the",
+                        ranked.get(0)[0], topShare));
+                out.add("  few threads bound to that arena, not to the process at large.");
+            } else {
+                out.add("  Growth is SPREAD across arenas - many threads allocate and retain, which");
+                out.add("  points at a shared subsystem (GC, chunk system) rather than one plugin.");
+            }
+        }
+        out.add("");
+
         out.add("--- Mappings that appeared or grew ---");
         appendMappingDelta(out, first, last);
         out.add("");

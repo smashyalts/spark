@@ -22,6 +22,7 @@ package me.lucko.spark.common.monitor.memory;
 
 import me.lucko.spark.common.monitor.DiagnosticCommand;
 
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -51,13 +52,16 @@ public final class GlibcArenaInfo {
     private static final Pattern FAST = Pattern.compile("<total type=\"fast\" count=\"\\d+\" size=\"(\\d+)\"");
     private static final Pattern SUBHEAPS = Pattern.compile("<aspace type=\"subheaps\" size=\"(\\d+)\"");
 
+    private final Map<Integer, long[]> perArena; // arena nr -> {systemBytes, freeBytes, subheaps}
     private final int arenas;
     private final long systemBytes;
     private final long freeBytes;
     private final int subheaps;
     private final boolean available;
 
-    private GlibcArenaInfo(int arenas, long systemBytes, long freeBytes, int subheaps, boolean available) {
+    private GlibcArenaInfo(int arenas, long systemBytes, long freeBytes, int subheaps, boolean available,
+                           Map<Integer, long[]> perArena) {
+        this.perArena = perArena;
         this.arenas = arenas;
         this.systemBytes = systemBytes;
         this.freeBytes = freeBytes;
@@ -85,6 +89,19 @@ public final class GlibcArenaInfo {
         return this.subheaps;
     }
 
+    /**
+     * Per-arena figures, keyed by glibc's arena number.
+     *
+     * <p>This is the closest thing to attribution available without hooking malloc. glibc binds a
+     * thread to an arena on first allocation and keeps it there, so growth concentrated in one
+     * arena means the leak belongs to the small set of threads bound to that arena rather than to
+     * the process at large. It does not name the caller, but it turns "something in this JVM" into
+     * "one of these few threads", which is a question a thread dump can then answer.</p>
+     */
+    public Map<Integer, long[]> perArena() {
+        return this.perArena;
+    }
+
     public boolean isAvailable() {
         return this.available;
     }
@@ -101,7 +118,7 @@ public final class GlibcArenaInfo {
     public static GlibcArenaInfo capture() {
         String xml = DiagnosticCommand.execute("System.native_heap_info");
         if (xml.startsWith(DiagnosticCommand.UNAVAILABLE) || !xml.contains("<malloc")) {
-            return new GlibcArenaInfo(0, 0, 0, 0, false);
+            return new GlibcArenaInfo(0, 0, 0, 0, false, java.util.Collections.emptyMap());
         }
 
         int arenas = 0;
@@ -109,16 +126,22 @@ public final class GlibcArenaInfo {
         long free = 0;
         int subheaps = 0;
 
+        Map<Integer, long[]> perArena = new java.util.LinkedHashMap<>();
         Matcher heaps = HEAP.matcher(xml);
         while (heaps.find()) {
+            int nr = Integer.parseInt(heaps.group(1));
             String body = heaps.group(2);
             arenas++;
             system += firstLong(SYSTEM_CURRENT, body);
             free += firstLong(REST, body) + firstLong(FAST, body);
             long sub = firstLong(SUBHEAPS, body);
             subheaps += (int) (sub == 0 ? 1 : sub);
+
+            long aSys = firstLong(SYSTEM_CURRENT, body);
+            long aFree = firstLong(REST, body) + firstLong(FAST, body);
+            perArena.put(nr, new long[]{aSys, aFree, sub == 0 ? 1 : sub});
         }
-        return new GlibcArenaInfo(arenas, system, free, subheaps, arenas > 0);
+        return new GlibcArenaInfo(arenas, system, free, subheaps, arenas > 0, perArena);
     }
 
     private static long firstLong(Pattern pattern, String text) {
