@@ -42,6 +42,8 @@ import me.lucko.spark.common.sampler.source.ClassSourceLookup;
 import me.lucko.spark.common.tick.TickHook;
 import me.lucko.spark.common.util.FormatUtil;
 import me.lucko.spark.common.util.MediaTypes;
+import me.lucko.spark.common.util.TimeUtil;
+import me.lucko.spark.common.ws.SamplerViewerSocket;
 import me.lucko.spark.common.ws.ViewerSocket;
 import me.lucko.spark.proto.SparkSamplerProtos;
 import net.kyori.adventure.text.Component;
@@ -318,7 +320,7 @@ public class SamplerModule implements CommandModule {
         } else {
             resp.replyPrefixed(text("Profiler is already running!", GOLD));
 
-            long runningTime = (System.currentTimeMillis() - sampler.getStartTime()) / 1000L;
+            long runningTime = (TimeUtil.monotonicCurrentTimeMillis() - sampler.getStartTime()) / 1000L;
 
             if (sampler.isRunningInBackground()) {
                 resp.replyPrefixed(text()
@@ -339,7 +341,7 @@ public class SamplerModule implements CommandModule {
                 resp.replyPrefixed(text("To stop the profiler and upload the results, run:"));
                 resp.replyPrefixed(cmdPrompt("/" + platform.getPlugin().getCommandName() + " profiler stop"));
             } else {
-                long timeoutDiff = (timeout - System.currentTimeMillis()) / 1000L;
+                long timeoutDiff = (timeout - TimeUtil.monotonicCurrentTimeMillis()) / 1000L;
                 resp.replyPrefixed(text("It is due to complete automatically and upload results in " + FormatUtil.formatSeconds(timeoutDiff) + "."));
             }
 
@@ -476,7 +478,7 @@ public class SamplerModule implements CommandModule {
 
     private void handleOpen(SparkPlatform platform, BytesocksClient bytesocksClient, CommandResponseHandler resp, Sampler sampler, Sampler.ExportProps exportProps) {
         try {
-            ViewerSocket socket = new ViewerSocket(platform, bytesocksClient, exportProps);
+            SamplerViewerSocket socket = new SamplerViewerSocket(platform, bytesocksClient, exportProps);
             sampler.attachSocket(socket);
             exportProps.channelInfo(socket.getPayload());
 

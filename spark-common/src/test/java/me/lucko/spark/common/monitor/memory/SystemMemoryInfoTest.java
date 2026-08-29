@@ -18,38 +18,19 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-package me.lucko.spark.common.monitor.tick;
+package me.lucko.spark.common.monitor.memory;
 
-import me.lucko.spark.api.statistic.misc.DoubleAverageInfo;
+import org.junit.jupiter.api.Test;
 
-import java.util.concurrent.TimeUnit;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Provides the server TPS (ticks per second) and MSPT (milliseconds per tick) rates.
- */
-public interface TickStatistics extends AutoCloseable {
+public class SystemMemoryInfoTest {
 
-    int gameTargetTps();
-
-    double tps5Sec();
-    double tps10Sec();
-    double tps1Min();
-    double tps5Min();
-    double tps15Min();
-
-    boolean isDurationSupported();
-
-    default int gameMaxIdealDuration() {
-        int millisInSeconds = (int) TimeUnit.SECONDS.toMillis(1);
-        return millisInSeconds / gameTargetTps();
+    @Test
+    public void testMemoryInfo() {
+        assertTrue(SystemMemoryInfo.getUsedPhysicalMemory() > 0);
+        assertTrue(SystemMemoryInfo.getTotalPhysicalMemory() > 0);
+        assertTrue(SystemMemoryInfo.getAvailablePhysicalMemory() > 0);
     }
 
-    DoubleAverageInfo duration10Sec();
-    DoubleAverageInfo duration1Min();
-    DoubleAverageInfo duration5Min();
-
-    @Override
-    default void close() {
-
-    }
 }
