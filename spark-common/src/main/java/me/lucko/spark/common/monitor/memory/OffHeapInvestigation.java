@@ -67,6 +67,10 @@ public final class OffHeapInvestigation {
         // moves while the start stays put - keying by the range made every grown mapping look like
         // a brand new one, and counted its whole size as growth instead of its delta.
         final Map<Long, long[]> mappings; // start address -> {resident bytes, mapped size}
+        // Paths, kept alongside. Re-keying by start address dropped them, which left the mapping
+        // delta printing bare hex addresses - so the largest grower, invariably the Java heap,
+        // read as an unexplained finding instead of the one entry a reader can safely dismiss.
+        final Map<Long, String> mappingPaths;
 
         // Leak classes that leave almost no trace in RSS, and so would be missed entirely by a
         // memory-only investigation: descriptors exhaust a ulimit, classloaders accumulate through
@@ -79,7 +83,9 @@ public final class OffHeapInvestigation {
         final long gcTimeMs;
 
         Sample(long timestamp, ProcessMemorySnapshot process, GlibcArenaInfo arenas, Map<Long, long[]> mappings,
+               Map<Long, String> mappingPaths,
                long openFds, long loadedClasses, long unloadedClasses, int threads, long gcCount, long gcTimeMs) {
+            this.mappingPaths = mappingPaths;
             this.timestamp = timestamp;
             this.process = process;
             this.arenas = arenas;
@@ -212,8 +218,12 @@ public final class OffHeapInvestigation {
 
     private static Sample capture() {
         Map<Long, long[]> mappings = new HashMap<>();
+        Map<Long, String> mappingPaths = new HashMap<>();
         for (ProcessMemory.Mapping m : ProcessMemory.getMappings()) {
             mappings.put(m.start(), new long[]{m.rss(), m.size()});
+            if (!m.anonymous()) {
+                mappingPaths.put(m.start(), m.path());
+            }
         }
         java.lang.management.ClassLoadingMXBean classes = java.lang.management.ManagementFactory.getClassLoadingMXBean();
         long gcCount = 0;
@@ -228,7 +238,7 @@ public final class OffHeapInvestigation {
             }
         }
         return new Sample(System.currentTimeMillis(), ProcessMemorySnapshot.capture(),
-                GlibcArenaInfo.capture(), mappings,
+                GlibcArenaInfo.capture(), mappings, mappingPaths,
                 ProcessMemory.getOpenFileDescriptors(),
                 classes.getLoadedClassCount(), classes.getUnloadedClassCount(),
                 java.lang.management.ManagementFactory.getThreadMXBean().getThreadCount(),
@@ -306,7 +316,9 @@ public final class OffHeapInvestigation {
                 ? last.process.unaccounted() + stackCorrection - fileBacked : 0;
 
         out.add("=== OFF-HEAP INVESTIGATION ===");
-        out.add(String.format("Duration: %.2f hours, %d samples", hours, this.samples.size()));
+        out.add(hours < 1
+                ? String.format("Duration: %.0f minutes, %d samples", hours * 60, this.samples.size())
+                : String.format("Duration: %.2f hours, %d samples", hours, this.samples.size()));
         if (windowTooShort(hours)) {
             out.add("WARNING: window under 15 minutes. Hourly rates below are extrapolated from");
             out.add("very little data and a startup ramp or a single GC cycle will dominate them.");
@@ -528,9 +540,20 @@ public final class OffHeapInvestigation {
         for (int[] r : ranked) {
             totalArenaGrowthMb += Math.max(0, r[1]);
         }
-        for (int i = 0; i < Math.min(8, ranked.size()); i++) {
+        int shown = 0;
+        int grewCountArenas = 0;
+        for (int i = 0; i < ranked.size() && shown < 8; i++) {
             int nr = ranked.get(i)[0];
             int mb = ranked.get(i)[1];
+            // Skip arenas that did not grow. Eight rows of "+0 bytes (0% of growth)" is noise that
+            // buries the one arena that did.
+            if (mb == 0) {
+                continue;
+            }
+            if (mb > 0) {
+                grewCountArenas++;
+            }
+            shown++;
             long[] cur = after.get(nr);
             double pct = totalArenaGrowthMb > 0 ? (100.0 * Math.max(0, mb) / totalArenaGrowthMb) : 0;
             out.add(String.format("  arena %-3d  %-9s (%4.0f%% of growth)  now %s, %.0f%% free, %d subheaps",
@@ -542,6 +565,9 @@ public final class OffHeapInvestigation {
         // served straight from mmap, so a leak made of big blocks leaves every arena flat - and
         // reporting that as "spread across arenas" would point at a shared subsystem when arenas
         // are not involved at all.
+        if (grewCountArenas == 0) {
+            out.add("  No arena grew over this window.");
+        }
         long mmapGrowth = last.arenas.mmapBytes() - first.arenas.mmapBytes();
         long arenaGrowthBytes = arenaGrowthExactBytes;
         if (mmapGrowth > arenaGrowthBytes && mmapGrowth > 64L * 1024 * 1024) {
@@ -623,6 +649,35 @@ public final class OffHeapInvestigation {
         return earlyRate <= 0 || lateRate >= earlyRate * 0.6;
     }
 
+    /**
+     * Names a mapping, so the reader is not left decoding hex.
+     *
+     * <p>A path covers file-backed mappings, which under ZGC includes the heap itself as a memfd.
+     * Under the anonymous-heap collectors there is no path at all, and the largest grower in the
+     * list is then the Java heap wearing no label - the one entry that can be safely dismissed,
+     * indistinguishable from the leak. Matching an anonymous mapping's size against the committed
+     * heap identifies it well enough to say so, hedged as "likely" because the match is
+     * circumstantial rather than authoritative.</p>
+     */
+    private static String describe(Sample sample, long address, long mappedSize) {
+        String path = sample.mappingPaths.get(address);
+        if (path != null && !path.isEmpty()) {
+            int slash = path.lastIndexOf('/');
+            return Long.toHexString(address) + " " + (slash >= 0 ? path.substring(slash + 1) : path);
+        }
+        long heap = sample.process.heapCommitted();
+        if (heap > 0 && mappedSize > 0) {
+            double ratio = (double) mappedSize / heap;
+            if (ratio > 0.6 && ratio < 1.6) {
+                return Long.toHexString(address) + " [anonymous, likely Java heap]";
+            }
+        }
+        if (mappedSize >= 60L * 1024 * 1024 && mappedSize <= 68L * 1024 * 1024) {
+            return Long.toHexString(address) + " [anonymous, glibc arena subheap]";
+        }
+        return Long.toHexString(address) + " [anonymous]";
+    }
+
     private void appendMappingDelta(List<String> out, Sample first, Sample last) {
         long newBytes = 0;
         int newCount = 0;
@@ -648,12 +703,12 @@ public final class OffHeapInvestigation {
                 gained = now[0];
                 newBytes += gained;
                 newCount++;
-                label = Long.toHexString(e.getKey()) + " (new, " + FormatUtil.formatBytes(now[1]) + " mapped)";
+                label = describe(last, e.getKey(), now[1]) + " (new, " + FormatUtil.formatBytes(now[1]) + " mapped)";
             } else if (now[0] > before[0]) {
                 gained = now[0] - before[0];
                 grewBytes += gained;
                 grewCount++;
-                label = Long.toHexString(e.getKey()) + " (grew, " + FormatUtil.formatBytes(now[1]) + " mapped)";
+                label = describe(last, e.getKey(), now[1]) + " (grew, " + FormatUtil.formatBytes(now[1]) + " mapped)";
             } else if (now[0] < before[0]) {
                 shrankBytes += before[0] - now[0];
                 shrankCount++;
