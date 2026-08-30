@@ -118,6 +118,43 @@ public enum DiagnosticCommand {
 
     private static volatile Boolean nmtEnabled;
 
+    /**
+     * Committed bytes for one NMT category, or -1 if unavailable.
+     *
+     * <p>Needed because the obvious estimates are wrong by large margins. Thread stacks are the
+     * clearest case: multiplying the thread count by the default stack size measures RESERVED
+     * address space, but only touched pages are resident, and on a server with several hundred
+     * threads the difference is most of a gigabyte. Attributing that phantom to the JVM makes
+     * everything unattributed look correspondingly smaller.</p>
+     */
+    public static long getNmtCommitted(String category) {
+        String summary = execute("VM.native_memory", "summary");
+        if (summary.startsWith(UNAVAILABLE) || summary.contains("not enabled")) {
+            return -1;
+        }
+        for (String line : summary.split("\n")) {
+            String trimmed = line.trim();
+            if (!trimmed.startsWith("-") || !trimmed.contains(category)) {
+                continue;
+            }
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("committed=(\\d+)([KMG]?)B").matcher(trimmed);
+            if (m.find()) {
+                long value = Long.parseLong(m.group(1));
+                String unit = m.group(2);
+                if ("K".equals(unit)) {
+                    return value * 1024L;
+                } else if ("M".equals(unit)) {
+                    return value * 1024L * 1024L;
+                } else if ("G".equals(unit)) {
+                    return value * 1024L * 1024L * 1024L;
+                }
+                return value;
+            }
+        }
+        return -1;
+    }
+
     /** Reads the current value of a -XX option, or null if it cannot be read. */
     public static String getVmOption(String option) {
         try {

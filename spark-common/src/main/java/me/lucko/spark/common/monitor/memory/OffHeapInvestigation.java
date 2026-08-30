@@ -226,6 +226,17 @@ public final class OffHeapInvestigation {
             hours = 1 / 3600d;
         }
 
+        // Thread stacks: NMT reports what is actually COMMITTED, where threads x default stack
+        // size measures reserved address space. Measured at 9.5x over on a 200 thread process, so
+        // the estimate silently shrinks the unattributed figure by most of a gigabyte on a server
+        // with several hundred threads - the exact number the whole report turns on.
+        long nmtThreadCommitted = DiagnosticCommand.getNmtCommitted("Thread");
+        long stackCorrection = 0;
+        if (nmtThreadCommitted >= 0) {
+            long estimated = (long) last.threads * 1024L * 1024L;
+            stackCorrection = estimated - nmtThreadCommitted;
+        }
+
         long rssGrowth = last.process.rss() - first.process.rss();
         long heapGrowth = last.process.heapCommitted() - first.process.heapCommitted();
         long nonHeapGrowth = last.process.nonHeapCommitted() - first.process.nonHeapCommitted();
@@ -234,6 +245,7 @@ public final class OffHeapInvestigation {
         // otherwise register as zero arena growth while the process grew by gigabytes.
         long arenaGrowth = last.arenas.totalHeldBytes() - first.arenas.totalHeldBytes();
         long unaccountedGrowth = last.process.unaccounted() - first.process.unaccounted();
+        long correctedUnaccounted = last.process.unaccounted() + stackCorrection;
 
         out.add("=== OFF-HEAP INVESTIGATION ===");
         out.add(String.format("Duration: %.2f hours, %d samples", hours, this.samples.size()));
@@ -249,6 +261,13 @@ public final class OffHeapInvestigation {
         out.add(rate("  NIO direct buffers", directGrowth, hours));
         out.add(rate("  glibc arenas (malloc_info)", arenaGrowth, hours));
         out.add(rate("Unaccounted", unaccountedGrowth, hours));
+        if (stackCorrection > 64L * 1024 * 1024) {
+            out.add(String.format("  NOTE: thread stacks over-counted by %s (estimate vs NMT actual).",
+                    FormatUtil.formatBytes(stackCorrection)));
+            out.add(String.format("  True unaccounted is therefore about %s, not %s.",
+                    FormatUtil.formatBytes(correctedUnaccounted),
+                    FormatUtil.formatBytes(last.process.unaccounted())));
+        }
         out.add("");
 
         // A Java object leak shows here and nowhere else in this report: committed heap climbing

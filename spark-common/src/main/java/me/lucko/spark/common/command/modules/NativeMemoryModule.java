@@ -715,6 +715,14 @@ public class NativeMemoryModule implements CommandModule {
         resp.replyPrefixed(entry("Accounted by the JVM", FormatUtil.formatBytes(
                 s.heapCommitted() + s.nonHeapCommitted() + s.directUsed())));
         resp.replyPrefixed(entry("Unaccounted", formatSigned(unaccounted)));
+        long nmtThreads = DiagnosticCommand.getNmtCommitted("Thread");
+        if (nmtThreads >= 0) {
+            long overcount = ((long) s.threads() * 1024L * 1024L) - nmtThreads;
+            if (overcount > 64L * 1024 * 1024) {
+                resp.replyPrefixed(text("    thread stacks over-counted by " + FormatUtil.formatBytes(overcount)
+                        + " - true unaccounted is nearer " + formatSigned(unaccounted + overcount), DARK_GRAY));
+            }
+        }
 
         Long lazyFree = s.smapsRollup().get("LazyFree");
         if (lazyFree != null && lazyFree > 0) {
