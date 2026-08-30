@@ -891,7 +891,11 @@ public class NativeMemoryModule implements CommandModule {
                 inv.begin(platform.getPlugin().getPluginDirectory()
                         .resolve("investigation-live-" + FILE_STAMP.format(Instant.now()) + ".csv"));
             } catch (Throwable t) {
+                // Clear the handle, or the command reports "already running" for the full duration
+                // while collecting nothing at all.
                 platform.getPlugin().log(Level.WARNING, "Investigation failed to start", t);
+                cancelInvestigation();
+                resp.replyPrefixed(text("Investigation failed to start - see the server log.", RED));
             }
         });
 

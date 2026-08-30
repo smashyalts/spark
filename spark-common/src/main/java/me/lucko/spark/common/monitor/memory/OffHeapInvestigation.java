@@ -136,6 +136,14 @@ public final class OffHeapInvestigation {
             return;
         }
         try {
+            // Create the parent directory. Without this the whole crash-resilience feature fails
+            // silently on a first run - the catch below swallows the error, and the operator only
+            // discovers the file was never written after the crash it was meant to survive.
+            java.nio.file.Path parent = this.incrementalLog.getParent();
+            if (parent != null) {
+                java.nio.file.Files.createDirectories(parent);
+            }
+
             StringBuilder sb = new StringBuilder();
             if (this.samples.size() == 1) {
                 sb.append("time,rss,heap_used,heap_committed,non_heap,nio_direct,")
@@ -168,6 +176,11 @@ public final class OffHeapInvestigation {
     }
 
     /** Progress line for an investigation already in flight. */
+    /** True once the opening sample landed - lets the caller detect a failed start. */
+    public boolean started() {
+        return !this.samples.isEmpty();
+    }
+
     public String progress() {
         if (this.samples.isEmpty()) {
             return "starting up";
@@ -469,12 +482,24 @@ public final class OffHeapInvestigation {
             int mb = ranked.get(i)[1];
             long[] cur = after.get(nr);
             double pct = totalArenaGrowthMb > 0 ? (100.0 * Math.max(0, mb) / totalArenaGrowthMb) : 0;
-            out.add(String.format("  arena %-3d  +%-8s (%4.0f%% of growth)  now %s, %.0f%% free, %d subheaps",
-                    nr, FormatUtil.formatBytes(mb * 1024L * 1024L), pct,
+            out.add(String.format("  arena %-3d  %-9s (%4.0f%% of growth)  now %s, %.0f%% free, %d subheaps",
+                    nr, (mb < 0 ? "-" : "+") + FormatUtil.formatBytes(Math.abs(mb) * 1024L * 1024L), pct,
                     FormatUtil.formatBytes(cur[0]),
                     cur[0] > 0 ? (100.0 * cur[1] / cur[0]) : 0, cur[2]));
         }
-        if (!ranked.isEmpty() && totalArenaGrowthMb > 0) {
+        // Arena figures cannot describe growth that never touched an arena. Large allocations are
+        // served straight from mmap, so a leak made of big blocks leaves every arena flat - and
+        // reporting that as "spread across arenas" would point at a shared subsystem when arenas
+        // are not involved at all.
+        long mmapGrowth = last.arenas.mmapBytes() - first.arenas.mmapBytes();
+        long arenaGrowthBytes = totalArenaGrowthMb * 1024L * 1024L;
+        if (mmapGrowth > arenaGrowthBytes && mmapGrowth > 64L * 1024 * 1024) {
+            out.add(String.format("  Most glibc growth (%s) is mmap-served, NOT in any arena.",
+                    FormatUtil.formatBytes(mmapGrowth)));
+            out.add("  These are large single allocations above the mmap threshold, freed with");
+            out.add("  munmap rather than returned to an arena - so retention here means genuinely");
+            out.add("  live blocks, and the per-arena split below cannot attribute them.");
+        } else if (!ranked.isEmpty() && totalArenaGrowthMb > 0) {
             double topShare = 100.0 * Math.max(0, ranked.get(0)[1]) / totalArenaGrowthMb;
             if (topShare > 60) {
                 out.add(String.format("  Growth is CONCENTRATED in arena %d (%.0f%%). The leak belongs to the",
