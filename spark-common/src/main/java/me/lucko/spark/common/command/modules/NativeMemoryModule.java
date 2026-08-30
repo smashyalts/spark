@@ -450,7 +450,16 @@ public class NativeMemoryModule implements CommandModule {
         // Judge arena retention by BYTES, not by region count. Sixteen arenas is 1 GiB; saying
         // "this is your problem" next to 25 GiB of other anonymous memory points the reader at
         // the wrong thing entirely. Only claim it when it is actually a meaningful share.
-        long arenaBytes = arenaLike * 64L * 1024 * 1024;
+        // Sum the ACTUAL resident bytes of the arena-shaped mappings. An earlier version multiplied
+        // the region count by 64 MiB, which is the reservation size, not what is resident - so a
+        // set of barely-touched subheaps was reported as holding their full nominal size. That is
+        // the same count-based estimate this warning was supposedly changed away from, just
+        // wearing a bytes label, and it produced figures larger than the total anonymous memory
+        // they were being compared against.
+        long arenaBytes = mappings.stream()
+                .filter(m -> m.anonymous() && m.size() >= 60L * 1024 * 1024 && m.size() <= 68L * 1024 * 1024)
+                .mapToLong(ProcessMemory.Mapping::rss)
+                .sum();
         String preloaded = ProcessMemory.getPreloadedAllocator();
         if (preloaded != null) {
             resp.replyPrefixed(text("Allocator: " + preloaded + " is preloaded in place of glibc malloc.", YELLOW));
@@ -492,7 +501,10 @@ public class NativeMemoryModule implements CommandModule {
         java.util.Map<String, long[]> libs = new java.util.TreeMap<>();
         for (ProcessMemory.Mapping m : sorted) {
             String path = m.path();
-            if (path.endsWith(".so") || path.contains(".so.")) {
+            // "(deleted)" is appended by the kernel for unlinked files, and temp-extracted natives
+            // are common - spark extracts its own profiler library that way. Matching only on a
+            // trailing .so misses both.
+            if (path.contains(".so")) {
                 long[] agg = libs.computeIfAbsent(path, k -> new long[2]);
                 agg[0] += m.rss();
                 agg[1]++;
