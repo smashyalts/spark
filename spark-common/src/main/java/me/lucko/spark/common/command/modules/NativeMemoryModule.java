@@ -300,12 +300,10 @@ public class NativeMemoryModule implements CommandModule {
             }
             resp.replyPrefixed(entry("Netty direct (pooled)", value));
         } else {
-            // Reporting nothing here reads as zero, which is a different claim entirely - and on
-            // a server where the question IS "where did the off-heap memory go", silently
-            // omitting a measurement is the worst of the available options.
-            // Reflection into Netty fails under isolating plugin classloaders, and no variant of
-            // it is going to succeed there. Saying so, and naming the flag that measures this
-            // without reflection, is more useful than reporting a bare failure.
+            // Reporting nothing here would read as zero, which is a different claim entirely.
+            // Reflection into Netty fails under isolating plugin classloaders and no variant of it
+            // will succeed there, so the honest answer is to say it is unmeasurable and name the
+            // flags that measure it without reflection.
             resp.replyPrefixed(entry("Netty direct", "not measurable from this classloader"));
             resp.replyPrefixed(text("    use -XX:MaxDirectMemorySize=<n> to bound it and get an attributable", DARK_GRAY));
             resp.replyPrefixed(text("    OutOfMemoryError, or -Dio.netty.leakDetection.level=paranoid to catch", DARK_GRAY));
@@ -324,8 +322,8 @@ public class NativeMemoryModule implements CommandModule {
             resp.replyPrefixed(entry("Freed but still resident (LazyFree)", FormatUtil.formatBytes(lazyFree)));
             if (lazyFree > 1024L * 1024 * 1024) {
                 resp.replyPrefixed(text("    this memory is already released by the application and the kernel", DARK_GRAY));
-                resp.replyPrefixed(text("    will reclaim it under pressure - it is NOT a leak, and subtracting", DARK_GRAY));
-                resp.replyPrefixed(text("    it from the unaccounted figure below is the honest comparison", DARK_GRAY));
+                resp.replyPrefixed(text("    will reclaim it under pressure - it is NOT a leak. It is subtracted", DARK_GRAY));
+                resp.replyPrefixed(text("    from the corrected figure below.", DARK_GRAY));
             }
         }
 
@@ -340,6 +338,10 @@ public class NativeMemoryModule implements CommandModule {
                 .append(text(formatSigned(unaccounted), unaccounted > 0 ? WHITE : GRAY))
                 .build());
         resp.replyPrefixed(text("    resident size minus heap, non-heap, direct buffers and thread stacks", DARK_GRAY));
+        // Apply the same corrections --investigate applies. Without this the three views report
+        // three different figures for one process, and the text above tells the reader to subtract
+        // LazyFree while the number beside it never does.
+        appendUnaccountedCorrections(resp, s, unaccounted);
         if (unaccounted < 0) {
             resp.replyPrefixed(text("    negative because committed heap is not all resident - normal without", DARK_GRAY));
             resp.replyPrefixed(text("    AlwaysPreTouch, and it means there is no off-heap gap to explain.", DARK_GRAY));
@@ -347,6 +349,51 @@ public class NativeMemoryModule implements CommandModule {
             resp.replyPrefixed(text("    this legitimately contains GC structures, glibc arenas and JNI memory -", DARK_GRAY));
             resp.replyPrefixed(text("    a large value is not a leak, a GROWING one is. Use --baseline then --diff.", DARK_GRAY));
         }
+    }
+
+    /**
+     * Prints the corrections that make the raw unaccounted figure meaningful.
+     *
+     * <p>Shared so that the summary, the diagnosis and the investigation cannot drift apart. Three
+     * commands quoting three different numbers for the same quantity is worse than any one of them
+     * being slightly off, because it destroys the reader's ability to compare across runs.</p>
+     */
+    private void appendUnaccountedCorrections(CommandResponseHandler resp, ProcessMemorySnapshot s, long unaccounted) {
+        if (unaccounted == Long.MIN_VALUE || unaccounted <= 0) {
+            return;
+        }
+        long corrected = unaccounted;
+        List<String> notes = new ArrayList<>();
+
+        long nmtThreads = DiagnosticCommand.getNmtCommitted("Thread");
+        if (nmtThreads >= 0) {
+            long stackSize = s.threadStackSize() > 0 ? s.threadStackSize() : 1024L * 1024L;
+            long overcount = ((long) s.threads() * stackSize) - nmtThreads;
+            if (overcount > 64L * 1024 * 1024) {
+                corrected += overcount;
+                notes.add("thread stacks over-counted by " + FormatUtil.formatBytes(overcount));
+            }
+        }
+
+        Long fileBacked = s.smapsRollup().get("Pss_File");
+        if (fileBacked != null && fileBacked > 64L * 1024 * 1024) {
+            corrected -= fileBacked;
+            notes.add("file-backed resident (jars, .so, mapped files): " + FormatUtil.formatBytes(fileBacked));
+        }
+
+        Long lazyFree = s.smapsRollup().get("LazyFree");
+        if (lazyFree != null && lazyFree > 64L * 1024 * 1024) {
+            corrected -= lazyFree;
+            notes.add("LazyFree (already released, reclaimable): " + FormatUtil.formatBytes(lazyFree));
+        }
+
+        if (notes.isEmpty()) {
+            return;
+        }
+        for (String note : notes) {
+            resp.replyPrefixed(text("    - " + note, DARK_GRAY));
+        }
+        resp.replyPrefixed(text("    corrected unaccounted: " + formatSigned(corrected), GRAY));
     }
 
     private void reportDiff(CommandResponseHandler resp, ProcessMemorySnapshot from, ProcessMemorySnapshot to) {
@@ -722,14 +769,7 @@ public class NativeMemoryModule implements CommandModule {
         resp.replyPrefixed(entry("Accounted by the JVM", FormatUtil.formatBytes(
                 s.heapCommitted() + s.nonHeapCommitted() + s.directUsed())));
         resp.replyPrefixed(entry("Unaccounted", formatSigned(unaccounted)));
-        long nmtThreads = DiagnosticCommand.getNmtCommitted("Thread");
-        if (nmtThreads >= 0) {
-            long overcount = ((long) s.threads() * 1024L * 1024L) - nmtThreads;
-            if (overcount > 64L * 1024 * 1024) {
-                resp.replyPrefixed(text("    thread stacks over-counted by " + FormatUtil.formatBytes(overcount)
-                        + " - true unaccounted is nearer " + formatSigned(unaccounted + overcount), DARK_GRAY));
-            }
-        }
+        appendUnaccountedCorrections(resp, s, unaccounted);
 
         Long lazyFree = s.smapsRollup().get("LazyFree");
         if (lazyFree != null && lazyFree > 0) {
