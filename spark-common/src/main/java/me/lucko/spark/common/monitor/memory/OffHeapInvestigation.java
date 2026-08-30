@@ -63,9 +63,12 @@ public final class OffHeapInvestigation {
         final long timestamp;
         final ProcessMemorySnapshot process;
         final GlibcArenaInfo arenas;
-        final Map<String, Long> mappings; // address range -> resident bytes
+        // Keyed by START address, not by the full range. Mappings grow upward, so the end address
+        // moves while the start stays put - keying by the range made every grown mapping look like
+        // a brand new one, and counted its whole size as growth instead of its delta.
+        final Map<Long, long[]> mappings; // start address -> {resident bytes, mapped size}
 
-        Sample(long timestamp, ProcessMemorySnapshot process, GlibcArenaInfo arenas, Map<String, Long> mappings) {
+        Sample(long timestamp, ProcessMemorySnapshot process, GlibcArenaInfo arenas, Map<Long, long[]> mappings) {
             this.timestamp = timestamp;
             this.process = process;
             this.arenas = arenas;
@@ -97,9 +100,9 @@ public final class OffHeapInvestigation {
     }
 
     private static Sample capture() {
-        Map<String, Long> mappings = new HashMap<>();
+        Map<Long, long[]> mappings = new HashMap<>();
         for (ProcessMemory.Mapping m : ProcessMemory.getMappings()) {
-            mappings.put(Long.toHexString(m.start()) + "-" + Long.toHexString(m.end()), m.rss());
+            mappings.put(m.start(), new long[]{m.rss(), m.size()});
         }
         return new Sample(System.currentTimeMillis(), ProcessMemorySnapshot.capture(),
                 GlibcArenaInfo.capture(), mappings);
@@ -270,35 +273,58 @@ public final class OffHeapInvestigation {
         int newCount = 0;
         long grewBytes = 0;
         int grewCount = 0;
+        long goneBytes = 0;
+        int goneCount = 0;
+        int arenaSized = 0;
+
+        // value: bytes gained. key: address, plus a marker for mappings that did not exist before.
         Map<String, Long> growth = new LinkedHashMap<>();
 
-        for (Map.Entry<String, Long> e : last.mappings.entrySet()) {
-            Long before = first.mappings.get(e.getKey());
+        for (Map.Entry<Long, long[]> e : last.mappings.entrySet()) {
+            long[] now = e.getValue();
+            long[] before = first.mappings.get(e.getKey());
+            long gained;
+            String label;
             if (before == null) {
-                newBytes += e.getValue();
+                gained = now[0];
+                newBytes += gained;
                 newCount++;
-                growth.put(e.getKey() + " (new)", e.getValue());
-            } else if (e.getValue() > before) {
-                grewBytes += e.getValue() - before;
+                label = Long.toHexString(e.getKey()) + " (new, " + FormatUtil.formatBytes(now[1]) + " mapped)";
+            } else if (now[0] > before[0]) {
+                gained = now[0] - before[0];
+                grewBytes += gained;
                 grewCount++;
-                growth.put(e.getKey(), e.getValue() - before);
+                label = Long.toHexString(e.getKey()) + " (grew, " + FormatUtil.formatBytes(now[1]) + " mapped)";
+            } else {
+                continue;
+            }
+            // The arena signature is the MAPPED SIZE being 64 MiB, not the amount gained. A region
+            // that merely grew by 64 MiB is not an arena subheap, and counting it as one pointed
+            // at glibc for growth that had nothing to do with it.
+            if (now[1] >= 60L * 1024 * 1024 && now[1] <= 68L * 1024 * 1024) {
+                arenaSized++;
+            }
+            growth.put(label, gained);
+        }
+
+        // Mappings that disappeared offset the gains. Without them the report can claim more
+        // growth than the process actually gained, which undermines every figure beside it.
+        for (Map.Entry<Long, long[]> e : first.mappings.entrySet()) {
+            if (!last.mappings.containsKey(e.getKey())) {
+                goneBytes += e.getValue()[0];
+                goneCount++;
             }
         }
 
         out.add(String.format("  %d new mappings holding %s", newCount, FormatUtil.formatBytes(newBytes)));
         out.add(String.format("  %d existing mappings grew by %s", grewCount, FormatUtil.formatBytes(grewBytes)));
-
-        // The SHAPE of the growth is the lead when nothing else attributes it. 64 MiB regions are
-        // glibc arena subheaps; a handful of very large ones is a direct-buffer or JNI consumer;
-        // thousands of small ones is thread stacks.
-        int sixtyFour = 0;
-        for (Map.Entry<String, Long> e : growth.entrySet()) {
-            if (e.getValue() >= 60L * 1024 * 1024 && e.getValue() <= 68L * 1024 * 1024) {
-                sixtyFour++;
-            }
-        }
-        if (sixtyFour > 0) {
-            out.add(String.format("  of which %d are 64 MiB - the glibc arena subheap signature", sixtyFour));
+        out.add(String.format("  %d mappings disappeared, releasing %s", goneCount, FormatUtil.formatBytes(goneBytes)));
+        out.add(String.format("  net from mappings: %s%s",
+                (newBytes + grewBytes - goneBytes) < 0 ? "-" : "+",
+                FormatUtil.formatBytes(Math.abs(newBytes + grewBytes - goneBytes))));
+        if (arenaSized > 0) {
+            out.add(String.format("  %d of the growing mappings are 64 MiB - the glibc arena subheap signature",
+                    arenaSized));
         }
 
         growth.entrySet().stream()

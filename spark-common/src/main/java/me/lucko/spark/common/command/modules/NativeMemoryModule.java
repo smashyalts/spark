@@ -224,7 +224,8 @@ public class NativeMemoryModule implements CommandModule {
         }
         if (arguments.boolFlag("investigate")) {
             int minutes = arguments.intFlag("investigate");
-            startInvestigation(platform, resp, minutes == -1 ? 90 : minutes);
+            // intFlag returns -1 for a bare flag; that means "use the default", not "cancel".
+            startInvestigation(platform, resp, minutes == -1 ? 120 : minutes);
             return;
         }
         if (arguments.boolFlag("dump")) {
@@ -830,9 +831,31 @@ public class NativeMemoryModule implements CommandModule {
      * plateau, and a bursty allocator looks idle between bursts.</p>
      */
     private void startInvestigation(SparkPlatform platform, CommandResponseHandler resp, int minutes) {
-        if (this.investigation != null) {
-            resp.replyPrefixed(text("An investigation is already running.", RED));
+        // 0 or negative cancels. Without this a mistyped duration commits the operator to
+        // waiting it out or reloading the plugin.
+        if (minutes <= 0) {
+            if (this.investigation == null) {
+                resp.replyPrefixed(text("No investigation is running.", GRAY));
+            } else {
+                cancelInvestigation();
+                resp.replyPrefixed(text("Investigation cancelled.", GOLD));
+            }
             return;
+        }
+
+        if (this.investigation != null) {
+            resp.replyPrefixed(text("An investigation is already running. Use --investigate 0 to cancel.", RED));
+            return;
+        }
+
+        // Clamp: under 5 minutes produces rates dominated by noise, and an unbounded value would
+        // schedule a report days out while holding a thread and a set of smaps snapshots.
+        if (minutes < 5) {
+            minutes = 5;
+            resp.replyPrefixed(text("Raised to the 5 minute minimum - shorter windows measure noise.", GRAY));
+        } else if (minutes > 720) {
+            minutes = 720;
+            resp.replyPrefixed(text("Capped at 12 hours.", GRAY));
         }
 
         OffHeapInvestigation inv = new OffHeapInvestigation();
@@ -907,6 +930,20 @@ public class NativeMemoryModule implements CommandModule {
                 this.investigationExecutor = null;
             }
         }, minutes, TimeUnit.MINUTES);
+    }
+
+    private void cancelInvestigation() {
+        ScheduledFuture<?> task = this.investigationTask;
+        if (task != null) {
+            task.cancel(false);
+            this.investigationTask = null;
+        }
+        ScheduledExecutorService executor = this.investigationExecutor;
+        if (executor != null) {
+            executor.shutdownNow();
+            this.investigationExecutor = null;
+        }
+        this.investigation = null;
     }
 
     /** Writes a report without needing a live command sender. */
