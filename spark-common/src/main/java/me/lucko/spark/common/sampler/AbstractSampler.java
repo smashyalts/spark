@@ -22,6 +22,7 @@ package me.lucko.spark.common.sampler;
 
 import me.lucko.spark.common.SparkPlatform;
 import me.lucko.spark.common.command.sender.CommandSender;
+import me.lucko.spark.common.monitor.Metrics;
 import me.lucko.spark.common.monitor.memory.GarbageCollectorStatistics;
 import me.lucko.spark.common.platform.SparkMetadata;
 import me.lucko.spark.common.sampler.aggregator.DataAggregator;
@@ -30,7 +31,9 @@ import me.lucko.spark.common.sampler.node.exporter.NodeExporter;
 import me.lucko.spark.common.sampler.source.ClassSourceLookup;
 import me.lucko.spark.common.sampler.window.ProtoTimeEncoder;
 import me.lucko.spark.common.sampler.window.WindowStatisticsCollector;
+import me.lucko.spark.common.util.TimeUtil;
 import me.lucko.spark.common.util.classfinder.ClassFinder;
+import me.lucko.spark.common.ws.SamplerViewerSocket;
 import me.lucko.spark.common.ws.ViewerSocket;
 import me.lucko.spark.proto.SparkProtos;
 import me.lucko.spark.proto.SparkSamplerProtos.SamplerData;
@@ -89,7 +92,7 @@ public abstract class AbstractSampler implements Sampler {
     protected Map<String, GarbageCollectorStatistics> initialGcStats;
 
     /** A set of viewer sockets linked to the sampler */
-    protected List<ViewerSocket> viewerSockets = new CopyOnWriteArrayList<>();
+    protected List<SamplerViewerSocket> viewerSockets = new CopyOnWriteArrayList<>();
 
     protected AbstractSampler(SparkPlatform platform, SamplerSettings settings) {
         this.platform = platform;
@@ -138,7 +141,7 @@ public abstract class AbstractSampler implements Sampler {
 
     @Override
     public void start() {
-        this.startTime = System.currentTimeMillis();
+        this.startTime = TimeUtil.monotonicCurrentTimeMillis();
     }
 
     @Override
@@ -152,20 +155,20 @@ public abstract class AbstractSampler implements Sampler {
             return;
         }
 
-        this.endTime = System.currentTimeMillis();
+        this.endTime = TimeUtil.monotonicCurrentTimeMillis();
         this.windowStatisticsCollector.stop();
-        for (ViewerSocket viewerSocket : this.viewerSockets) {
+        for (SamplerViewerSocket viewerSocket : this.viewerSockets) {
             viewerSocket.processSamplerStopped(this);
         }
     }
 
     @Override
-    public void attachSocket(ViewerSocket socket) {
+    public void attachSocket(SamplerViewerSocket socket) {
         this.viewerSockets.add(socket);
     }
 
     @Override
-    public Collection<ViewerSocket> getAttachedSockets() {
+    public Collection<SamplerViewerSocket> getAttachedSockets() {
         return this.viewerSockets;
     }
 
@@ -189,9 +192,10 @@ public abstract class AbstractSampler implements Sampler {
 
             SparkProtos.PlatformStatistics platform = this.platform.getStatisticsProvider().getPlatformStatistics(getInitialGcStats(), false);
             SparkProtos.SystemStatistics system = this.platform.getStatisticsProvider().getSystemStatistics();
+            SparkProtos.Metrics metrics = Metrics.exportProto();
 
             for (ViewerSocket viewerSocket : this.viewerSockets) {
-                viewerSocket.sendUpdatedStatistics(platform, system);
+                viewerSocket.sendUpdatedStatistics(platform, system, metrics);
             }
         } catch (Exception e) {
             this.platform.getPlugin().log(Level.WARNING, "Exception occurred while sending statistics to viewer", e);

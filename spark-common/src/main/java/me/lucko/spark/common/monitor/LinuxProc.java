@@ -30,6 +30,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Collections;
 import java.util.List;
+import java.util.stream.Stream; // fork
 
 /**
  * Utility for reading from /proc/ on Linux systems.
@@ -54,7 +55,68 @@ public enum LinuxProc {
     /**
      * Information about the operating system distro.
      */
-    OSINFO("/etc/os-release");
+    OSINFO("/etc/os-release"),
+
+    // fork - the entries below describe THIS process and its container, rather than the machine.
+    // They back the off-heap diagnostics in ProcessMemory: the JVM's own MX beans can only report
+    // regions the JVM manages, so the gap between those and the process's real resident size is
+    // invisible without reading the kernel's view directly.
+
+    /**
+     * Status of the current process, including its resident set size. // fork
+     */
+    SELF_STATUS("/proc/self/status"),
+
+    /**
+     * Kernel-aggregated summary of every memory mapping of the current process. // fork
+     */
+    SELF_SMAPS_ROLLUP("/proc/self/smaps_rollup"),
+
+    /**
+     * Per-mapping memory detail for the current process - the source for a pmap-style view. // fork
+     */
+    SELF_SMAPS("/proc/self/smaps"),
+
+    /**
+     * Mapping list for the current process - cheaper than smaps when only paths are needed. // fork
+     */
+    SELF_MAPS("/proc/self/maps"),
+
+    /**
+     * Resource limits for the current process - used to warn before a descriptor leak hits the
+     * ceiling rather than after. // fork
+     */
+    SELF_LIMITS("/proc/self/limits"),
+
+    /**
+     * Current memory usage of the container cgroup, v2 layout. Includes page cache. // fork
+     */
+    CGROUP_V2_MEMORY_CURRENT("/sys/fs/cgroup/memory.current"),
+
+    /**
+     * Memory limit of the container cgroup, v2 layout. // fork
+     */
+    CGROUP_V2_MEMORY_MAX("/sys/fs/cgroup/memory.max"),
+
+    /**
+     * Memory breakdown of the container cgroup, v2 layout. // fork
+     */
+    CGROUP_V2_MEMORY_STAT("/sys/fs/cgroup/memory.stat"),
+
+    /**
+     * Current memory usage of the container cgroup, v1 layout. // fork
+     */
+    CGROUP_V1_MEMORY_USAGE("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+
+    /**
+     * Memory limit of the container cgroup, v1 layout. // fork
+     */
+    CGROUP_V1_MEMORY_LIMIT("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+
+    /**
+     * Memory breakdown of the container cgroup, v1 layout. // fork
+     */
+    CGROUP_V1_MEMORY_STAT("/sys/fs/cgroup/memory/memory.stat");
 
     private final Path path;
 
@@ -72,6 +134,20 @@ public enum LinuxProc {
             // ignore
         }
         return null;
+    }
+
+    /**
+     * Streams the file line by line. // fork
+     *
+     * <p>Exists for /proc files that are large enough that materialising them as a list is a
+     * problem in itself - smaps on a big JVM is tens of thousands of lines, and this runs on a
+     * server that may already be short of memory. The caller must close the stream.</p>
+     */
+    public Stream<@NonNull String> lines() throws IOException { // fork
+        if (this.path == null) {
+            return Stream.empty();
+        }
+        return Files.lines(this.path, StandardCharsets.UTF_8);
     }
 
     public @NonNull List<String> read() {

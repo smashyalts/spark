@@ -18,38 +18,21 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-package me.lucko.spark.common.monitor.tick;
+package me.lucko.spark.common.util;
 
-import me.lucko.spark.api.statistic.misc.DoubleAverageInfo;
+import org.junit.jupiter.api.Test;
 
-import java.util.concurrent.TimeUnit;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
-/**
- * Provides the server TPS (ticks per second) and MSPT (milliseconds per tick) rates.
- */
-public interface TickStatistics extends AutoCloseable {
+public class TimeUtilTest {
 
-    int gameTargetTps();
+    @Test
+    public void testMonotonicCurrentTimeMillis() {
+        long clockTimeMillis = System.currentTimeMillis();
+        long monotonicTimeNow = TimeUtil.monotonicCurrentTimeMillis();
 
-    double tps5Sec();
-    double tps10Sec();
-    double tps1Min();
-    double tps5Min();
-    double tps15Min();
-
-    boolean isDurationSupported();
-
-    default int gameMaxIdealDuration() {
-        int millisInSeconds = (int) TimeUnit.SECONDS.toMillis(1);
-        return millisInSeconds / gameTargetTps();
+        // approximate check that the monotonic time is within 1 second of the system clock time
+        assertEquals(clockTimeMillis, monotonicTimeNow, 1000L);
     }
 
-    DoubleAverageInfo duration10Sec();
-    DoubleAverageInfo duration1Min();
-    DoubleAverageInfo duration5Min();
-
-    @Override
-    default void close() {
-
-    }
 }

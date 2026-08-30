@@ -53,6 +53,7 @@ import java.util.stream.Stream;
 public class BukkitSparkPlugin extends JavaPlugin implements SparkPlugin {
     private BukkitAudiences audienceFactory;
     private ThreadDumper gameThreadDumper;
+    private SparkScheduler scheduler; // fork
 
     private SparkPlatform platform;
 
@@ -60,6 +61,11 @@ public class BukkitSparkPlugin extends JavaPlugin implements SparkPlugin {
 
     @Override
     public void onEnable() {
+        this.scheduler = SparkScheduler.create(this); // fork - must exist before anything schedules
+        if (SparkScheduler.isFolia()) {
+            getLogger().info("Folia detected - using the async and global region schedulers.");
+        }
+
         boolean detectedSparkMod = classExists("me.lucko.spark.forge.ForgeSparkMod")
                 || classExists("me.lucko.spark.fabric.FabricSparkMod")
                 || classExists("me.lucko.spark.neoforge.NeoForgeSparkMod");
@@ -70,7 +76,18 @@ public class BukkitSparkPlugin extends JavaPlugin implements SparkPlugin {
         }
 
         this.audienceFactory = BukkitAudiences.create(this);
-        this.gameThreadDumper = new ThreadDumper.Specific(Thread.currentThread());
+        // fork - on a regionised server there is no "the server thread". Ticking happens on many
+        // region threads, and the thread that enables plugins does no tick work afterwards.
+        // Pinning to it makes ThreadDumper.Specific match nothing, and because the same filter
+        // gates execution, native-memory AND heap-leak events, every collector returns an empty
+        // tree with no error logged - a profile that looks successful and contains nothing.
+        if (SparkScheduler.isFolia()) {
+            this.gameThreadDumper = ThreadDumper.ALL;
+            getLogger().info("Regionised server detected - profiling all threads by default, "
+                    + "as there is no single server thread to target.");
+        } else {
+            this.gameThreadDumper = new ThreadDumper.Specific(Thread.currentThread());
+        }
 
         this.platform = new SparkPlatform(this);
         this.platform.enable();
@@ -109,6 +126,9 @@ public class BukkitSparkPlugin extends JavaPlugin implements SparkPlugin {
     public void onDisable() {
         if (this.platform != null) {
             this.platform.disable();
+        }
+        if (this.scheduler != null) {
+            this.scheduler.cancelAll(); // fork
         }
         if (this.tpsCommand != null) {
             CommandMapUtil.unregisterCommand(this.tpsCommand);
@@ -151,12 +171,12 @@ public class BukkitSparkPlugin extends JavaPlugin implements SparkPlugin {
 
     @Override
     public void executeAsync(Runnable task) {
-        getServer().getScheduler().runTaskAsynchronously(this, task);
+        this.scheduler.executeAsync(task); // fork - Folia has no BukkitScheduler
     }
 
     @Override
     public void executeSync(Runnable task) {
-        getServer().getScheduler().runTask(this, task);
+        this.scheduler.executeSync(task); // fork - Folia has no BukkitScheduler
     }
 
     @Override

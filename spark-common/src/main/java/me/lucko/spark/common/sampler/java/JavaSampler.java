@@ -21,6 +21,8 @@
 package me.lucko.spark.common.sampler.java;
 
 import me.lucko.spark.common.SparkPlatform;
+import me.lucko.spark.common.monitor.memory.ProcessMemorySnapshot; // fork
+import me.lucko.spark.proto.SparkSamplerProtos; // fork
 import me.lucko.spark.common.sampler.AbstractSampler;
 import me.lucko.spark.common.sampler.SamplerMode;
 import me.lucko.spark.common.sampler.SamplerSettings;
@@ -31,13 +33,15 @@ import me.lucko.spark.common.tick.TickHook;
 import me.lucko.spark.common.util.MethodDisambiguator;
 import me.lucko.spark.common.util.SparkScheduledThreadPoolExecutor;
 import me.lucko.spark.common.util.SparkThreadFactory;
-import me.lucko.spark.common.ws.ViewerSocket;
+import me.lucko.spark.common.util.TimeUtil;
+import me.lucko.spark.common.ws.SamplerViewerSocket;
 import me.lucko.spark.proto.SparkSamplerProtos.SamplerData;
 
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.logging.Level;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -90,7 +94,7 @@ public class JavaSampler extends AbstractSampler implements Runnable {
             }
         }
 
-        this.windowStatisticsCollector.recordWindowStartTime(ProfilingWindowUtils.unixMillisToWindow(this.startTime));
+        this.windowStatisticsCollector.recordWindowStartTime(ProfilingWindowUtils.monotonicTimeToWindow(this.startTime));
         this.task = this.workerPool.scheduleAtFixedRate(this, 0, this.interval, TimeUnit.MICROSECONDS);
     }
 
@@ -117,7 +121,7 @@ public class JavaSampler extends AbstractSampler implements Runnable {
         // this is effectively synchronized, the worker pool will not allow this task
         // to concurrently execute.
         try {
-            long time = System.currentTimeMillis();
+            long time = TimeUtil.monotonicCurrentTimeMillis();
 
             if (this.autoEndTime != -1 && this.autoEndTime <= time) {
                 stop(false);
@@ -125,7 +129,7 @@ public class JavaSampler extends AbstractSampler implements Runnable {
                 return;
             }
 
-            int window = ProfilingWindowUtils.unixMillisToWindow(time);
+            int window = ProfilingWindowUtils.monotonicTimeToWindow(time);
             ThreadInfo[] threadDumps = this.threadDumper.dumpThreads(this.threadBean);
             this.workerPool.execute(new InsertDataTask(threadDumps, window));
         } catch (Throwable t) {
@@ -135,7 +139,7 @@ public class JavaSampler extends AbstractSampler implements Runnable {
     }
 
     @Override
-    public void attachSocket(ViewerSocket socket) {
+    public void attachSocket(SamplerViewerSocket socket) {
         super.attachSocket(socket);
 
         if (this.socketStatisticsTask == null) {
@@ -192,6 +196,23 @@ public class JavaSampler extends AbstractSampler implements Runnable {
 
         MethodDisambiguator methodDisambiguator = new MethodDisambiguator(platform.createClassFinder());
         writeDataToProto(proto, this.dataAggregator, timeEncoder -> new JavaNodeExporter(timeEncoder, exportProps.mergeStrategy(), methodDisambiguator), exportProps.classSourceLookup().get(), platform::createClassFinder);
+
+        // fork - process memory accounting, same as AsyncSampler. The Java engine cannot do leak
+        // detection, but the accounting is engine-independent and equally worth having here.
+        // fork - guarded, same reasoning as AsyncSampler: the accounting is a bonus on top of the
+        // profile, so it must never be able to cost the profile itself.
+        boolean capturedMemory = false;
+        try {
+            proto.setProcessMemory(ProcessMemorySnapshot.capture().toProto());
+            capturedMemory = true;
+        } catch (Throwable t) {
+            platform.getPlugin().log(Level.WARNING, "Unable to capture process memory accounting", t);
+        }
+        proto.setExtendedContents(SparkSamplerProtos.ExtendedProfileContents.newBuilder()
+                .setHasExecution(true)
+                .setHasProcessMemory(capturedMemory)
+                .setForkVersion(me.lucko.spark.common.sampler.async.AsyncSampler.FORK_VERSION)
+                .build());
 
         return proto.build();
     }

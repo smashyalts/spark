@@ -100,6 +100,68 @@ unchanged.
   subclass, so the `instanceof Allocation` tests these two sites originally used never
   matched the collector `--heap-leaks` actually registers.
 
+### `spark-common/.../command/modules/NativeMemoryModule.java` (new)
+- Adds `/spark offheap` (aliases `nativememory`, `nm`): resident set size versus what the JVM
+  can account for, largest memory mappings, NMT summary/baseline/diff, `System.trim_native_heap`,
+  memory-relevant startup flags, `--baseline`/`--diff`, and `--watch <minutes>` writing a CSV to
+  the plugin directory.
+
+  This complements `--leaks` rather than duplicating it. The leak profiler intercepts
+  `malloc`/`realloc`/`calloc`/`free` but not `mmap`, so a leak made of large buffers, or growth
+  in metaspace, the code cache or glibc's arenas, cannot appear in it however long the capture
+  runs. This command answers the question that comes first: how much resident memory is
+  unattributable at all, and is that quantity growing. It deliberately refuses to call anything
+  a leak from one reading - a large stable figure is structural, only growth is a leak.
+
+  `--upload` posts a snapshot to bytebin as `application/x-spark-sampler` - the same content
+  type and the same `SamplerData` message as any other spark profile, rather than a new format.
+  Proto3 preserves unknown fields, so the stock viewer accepts it and shows an empty profile
+  instead of an error, and any tool that already parses spark profiles reads it with no second
+  code path. `memory_accounting_only` marks it so a reader can distinguish "never sampled" from
+  "sampled and found nothing" - reporting the latter for the former would be a false negative
+  presented as a result.
+
+  Everything it reads is available in-process, with no shell, no attach API and no container
+  exec, because on a managed host the operator often has a plugin and a web panel and nothing
+  else.
+
+### `spark-common/.../monitor/memory/ProcessMemory.java` (new)
+- Reads the kernel's view of this process: `VmRSS`, `smaps_rollup`, per-mapping `smaps` (a
+  pmap-style view), and the container's cgroup memory figures for both v1 and v2 layouts. Also
+  detects the shape of glibc's 64 MiB per-arena reservations, which is the most common cause of
+  apparent native growth that is not a bug.
+
+### `spark-common/.../monitor/memory/ProcessMemorySnapshot.java` (new)
+- One reading of every in-process memory figure, with a `toProto()` export. Attached to EVERY
+  profile the fork exports (`SamplerData.process_memory`, field **1103**), not only memory ones,
+  because a leak total is uninterpretable without it: the same "600 KB unfreed" describes a
+  healthy server and a badly broken one, and only the gap between resident size and what the JVM
+  can account for distinguishes them. The default capture skips smaps parsing and is single-digit
+  milliseconds.
+
+### `spark-common/.../monitor/DiagnosticCommand.java` (new)
+- Runs jcmd diagnostic commands through `com.sun.management:type=DiagnosticCommand` on the
+  platform MBean server, making `VM.native_memory`, `GC.heap_info`, `VM.metaspace` and
+  `System.trim_native_heap` reachable from inside the process.
+
+### `spark-common/.../monitor/LinuxProc.java`
+- Added entries for `/proc/self/status`, `/proc/self/smaps_rollup`, `/proc/self/smaps` and the
+  cgroup v1/v2 memory files.
+
+### `spark-common/src/main/proto/spark/spark_sampler.proto`
+- Added `SamplerData.process_memory` (field **1103**), plus `ProcessMemoryData` and
+  `MemoryMapping` messages, and `has_process_memory` / `memory_accounting_only` on
+  `ExtendedProfileContents`. Same fenced high-field-number band and same rationale as 1100-1102.
+
+### `spark-common/.../sampler/async/AsyncSampler.java`, `.../sampler/java/JavaSampler.java`
+- Both attach process memory accounting at export time.
+
+### `spark-common/.../command/CommandManager.java`
+- Registers `NativeMemoryModule`.
+
+### `spark-common/src/test/.../SparkPlatformTest.java`
+- Added `spark.offheap` to the expected permission set.
+
 ### `spark-common/.../sampler/AbstractSampler.java`
 - Added `writeExtraDataToProto`. Kept separate from `writeDataToProto` because that
   method also writes profile-wide data (time windows, window statistics, class source

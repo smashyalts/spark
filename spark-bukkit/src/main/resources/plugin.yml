@@ -10,6 +10,10 @@ main: me.lucko.spark.bukkit.BukkitSparkPlugin
 # spark is still compatible with pre-1.13 releases.
 api-version: 1.13
 
+# fork - Folia refuses to load any plugin not explicitly marked as compatible. spark schedules
+# work in three places, all of which now route through SparkScheduler.
+folia-supported: true
+
 softdepend: [PlaceholderAPI, MVdWPlaceholderAPI]
 
 commands:

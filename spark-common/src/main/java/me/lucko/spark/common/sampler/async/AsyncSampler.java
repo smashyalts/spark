@@ -21,6 +21,7 @@
 package me.lucko.spark.common.sampler.async;
 
 import me.lucko.spark.common.SparkPlatform;
+import me.lucko.spark.common.monitor.memory.ProcessMemorySnapshot; // fork
 import me.lucko.spark.common.platform.PlatformInfo;
 import me.lucko.spark.common.sampler.AbstractSampler;
 import me.lucko.spark.common.sampler.SamplerMode;
@@ -33,7 +34,8 @@ import me.lucko.spark.common.sampler.window.ProtoTimeEncoder; // fork
 import me.lucko.spark.common.tick.TickHook;
 import me.lucko.spark.common.util.SparkScheduledThreadPoolExecutor;
 import me.lucko.spark.common.util.SparkThreadFactory;
-import me.lucko.spark.common.ws.ViewerSocket;
+import me.lucko.spark.common.util.TimeUtil;
+import me.lucko.spark.common.ws.SamplerViewerSocket;
 import me.lucko.spark.proto.SparkSamplerProtos;
 import me.lucko.spark.proto.SparkSamplerProtos.SamplerData;
 
@@ -138,7 +140,7 @@ public class AsyncSampler extends AbstractSampler {
             this.windowStatisticsCollector.startCountingTicks(tickHook);
         }
 
-        int window = ProfilingWindowUtils.windowNow();
+        int window = ProfilingWindowUtils.monotonicTimeToWindow(this.startTime);
 
         AsyncProfilerJob job = this.profilerAccess.startNewProfilerJob();
         job.init(this.platform, this.sampleCollector, ImmutableList.copyOf(this.extraAggregators.keySet()), this.threadDumper, window, this.background, this.forceNanoTime);
@@ -230,7 +232,7 @@ public class AsyncSampler extends AbstractSampler {
             return;
         }
 
-        long delay = this.autoEndTime - System.currentTimeMillis();
+        long delay = this.autoEndTime - TimeUtil.monotonicCurrentTimeMillis();
         if (delay <= 0) {
             return;
         }
@@ -306,7 +308,7 @@ public class AsyncSampler extends AbstractSampler {
     }
 
     @Override
-    public void attachSocket(ViewerSocket socket) {
+    public void attachSocket(SamplerViewerSocket socket) {
         super.attachSocket(socket);
 
         if (this.socketStatisticsTask == null) {
@@ -362,10 +364,10 @@ public class AsyncSampler extends AbstractSampler {
      * reporting nothing at all.</p>
      */
     private void writeExtendedDataToProto(SamplerData.Builder proto, ProtoTimeEncoder timeEncoder, Map<SampleCollector<?>, List<ThreadNode>> extraTrees) {
-        // Derived from the primary collector rather than hardcoded. '--alloc --native-mem' is an
-        // accepted combination and builds a primary Allocation collector, so the primary tree then
-        // holds bytes allocated rather than execution time - and a reader that trusted a hardcoded
-        // has_execution would render those bytes as CPU milliseconds.
+        // Derived from the primary collector rather than hardcoded. '--alloc --native-leaks' is
+        // an accepted combination and builds a primary Allocation collector, so the primary tree
+        // then holds bytes allocated rather than execution time - and a reader that trusted a
+        // hardcoded has_execution would render those bytes as CPU milliseconds.
         SparkSamplerProtos.ExtendedProfileContents.Builder contents = SparkSamplerProtos.ExtendedProfileContents.newBuilder()
                 .setHasExecution(this.sampleCollector instanceof SampleCollector.Execution)
                 .setLeakTailRatio(AsyncProfilerJob.LEAK_TAIL_RATIO)
@@ -375,9 +377,25 @@ public class AsyncSampler extends AbstractSampler {
         // exported: a leak total is read as a rate, and a profile exported minutes after the fact
         // (or exported repeatedly, as the live viewer does) would otherwise claim a longer
         // recording than it ran for and understate the leak.
-        long endTime = this.endTime == -1 ? System.currentTimeMillis() : this.endTime;
+        long endTime = this.endTime == -1 ? TimeUtil.monotonicCurrentTimeMillis() : this.endTime;
         long duration = this.startTime == -1 ? 0 : endTime - this.startTime;
         contents.setDurationMillis(duration);
+
+        // fork - process-level memory accounting on every export, memory profile or not.
+        // Cheap (no smaps parse), and it is what makes a leak total interpretable: the same
+        // number means something completely different depending on how much of the process's
+        // resident memory the JVM can already account for.
+        // fork - guarded. This runs on EVERY profile export, including plain CPU profiles that
+        // have nothing to do with memory, so a failure here must cost the memory section and
+        // nothing else. Losing an hour-long profiling run because /proc looked unfamiliar, or an
+        // MBean behaved oddly on an unusual JVM, would be a far worse outcome than the missing
+        // accounting - and the analysis side already handles its absence.
+        try {
+            proto.setProcessMemory(ProcessMemorySnapshot.capture().toProto());
+            contents.setHasProcessMemory(true);
+        } catch (Throwable t) {
+            this.platform.getPlugin().log(Level.WARNING, "Unable to capture process memory accounting", t);
+        }
 
         for (Map.Entry<SampleCollector<?>, List<ThreadNode>> entry : extraTrees.entrySet()) {
             SampleCollector<?> collector = entry.getKey();

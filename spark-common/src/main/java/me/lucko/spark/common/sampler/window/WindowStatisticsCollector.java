@@ -28,6 +28,7 @@ import me.lucko.spark.common.platform.world.AsyncWorldInfoProvider;
 import me.lucko.spark.common.platform.world.WorldInfoProvider;
 import me.lucko.spark.common.sampler.java.TickedJavaDataAggregator;
 import me.lucko.spark.common.tick.TickHook;
+import me.lucko.spark.common.util.TimeUtil;
 import me.lucko.spark.proto.SparkProtos;
 
 import java.util.Map;
@@ -113,7 +114,7 @@ public class WindowStatisticsCollector {
      * @param window the window
      */
     public void recordWindowStartTime(int window) {
-        this.windowStartTimes.put(window, System.currentTimeMillis());
+        this.windowStartTimes.put(window, TimeUtil.monotonicCurrentTimeMillis());
     }
 
     /**
@@ -152,7 +153,7 @@ public class WindowStatisticsCollector {
     private SparkProtos.WindowStatistics measure(int window) {
         SparkProtos.WindowStatistics.Builder builder = SparkProtos.WindowStatistics.newBuilder();
 
-        long endTime = System.currentTimeMillis();
+        long endTime = TimeUtil.monotonicCurrentTimeMillis();
         Long startTime = this.windowStartTimes.get(window);
         if (startTime == null) {
             this.platform.getPlugin().log(Level.WARNING, "Unknown start time for window " + window);
