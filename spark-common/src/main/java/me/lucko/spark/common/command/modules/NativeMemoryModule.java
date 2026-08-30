@@ -843,8 +843,11 @@ public class NativeMemoryModule implements CommandModule {
             return;
         }
 
-        if (this.investigation != null) {
-            resp.replyPrefixed(text("An investigation is already running. Use --investigate 0 to cancel.", RED));
+        OffHeapInvestigation running = this.investigation;
+        if (running != null) {
+            resp.replyPrefixed(text("An investigation is already running.", GOLD));
+            resp.replyPrefixed(text("  " + running.progress(), GRAY));
+            resp.replyPrefixed(text("Use --investigate 0 to cancel it.", GRAY));
             return;
         }
 
@@ -872,7 +875,8 @@ public class NativeMemoryModule implements CommandModule {
 
         executor.execute(() -> {
             try {
-                inv.begin();
+                inv.begin(platform.getPlugin().getPluginDirectory()
+                        .resolve("investigation-live-" + FILE_STAMP.format(Instant.now()) + ".csv"));
             } catch (Throwable t) {
                 platform.getPlugin().log(Level.WARNING, "Investigation failed to start", t);
             }

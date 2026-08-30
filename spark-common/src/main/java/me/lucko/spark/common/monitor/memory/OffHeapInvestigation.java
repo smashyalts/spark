@@ -76,8 +76,11 @@ public final class OffHeapInvestigation {
         }
     }
 
-    private final List<Sample> samples = new ArrayList<>();
-    private String nmtBaselineResult;
+    // Copy-on-write: sampled from the investigation thread, read by command threads asking for
+    // progress. Sample counts are tiny and reads are rare, so the copy cost is irrelevant.
+    private final List<Sample> samples = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private volatile boolean nmtBaselineOk;
+    private java.nio.file.Path incrementalLog;
 
     /**
      * Takes the opening sample and asks NMT to record a baseline.
@@ -86,13 +89,73 @@ public final class OffHeapInvestigation {
      * way to see which JVM region grew, as opposed to how large each is now. A region that is
      * merely big has usually always been big.</p>
      */
-    public void begin() {
-        this.nmtBaselineResult = DiagnosticCommand.execute("VM.native_memory", "baseline");
-        this.samples.add(capture());
+    /**
+     * @param incrementalLog file to append each sample to, or null. Written as the run proceeds so
+     *                       a crash mid-investigation still leaves the data behind - which matters
+     *                       most on exactly the servers worth investigating, since an OOM during a
+     *                       two hour run would otherwise destroy the evidence it was gathering.
+     */
+    public void begin(java.nio.file.Path incrementalLog) {
+        this.incrementalLog = incrementalLog;
+        String result = DiagnosticCommand.execute("VM.native_memory", "baseline");
+        // A failed baseline is not cosmetic: summary.diff would then compare against whatever
+        // baseline was set previously, silently reporting the wrong deltas.
+        this.nmtBaselineOk = !result.startsWith(DiagnosticCommand.UNAVAILABLE)
+                && !result.contains("not enabled");
+        record(capture());
     }
 
     public void sample() {
-        this.samples.add(capture());
+        record(capture());
+    }
+
+    private void record(Sample sample) {
+        this.samples.add(sample);
+        appendIncremental(sample);
+    }
+
+    private void appendIncremental(Sample sample) {
+        if (this.incrementalLog == null) {
+            return;
+        }
+        try {
+            StringBuilder sb = new StringBuilder();
+            if (this.samples.size() == 1) {
+                sb.append("time,rss,heap_used,heap_committed,non_heap,nio_direct,")
+                        .append("glibc_held,glibc_free,arenas,subheaps,unaccounted\n");
+            }
+            sb.append(sample.timestamp).append(',')
+                    .append(sample.process.rss()).append(',')
+                    .append(sample.process.heapUsed()).append(',')
+                    .append(sample.process.heapCommitted()).append(',')
+                    .append(sample.process.nonHeapCommitted()).append(',')
+                    .append(sample.process.directUsed()).append(',')
+                    .append(sample.arenas.systemBytes()).append(',')
+                    .append(sample.arenas.freeBytes()).append(',')
+                    .append(sample.arenas.arenas()).append(',')
+                    .append(sample.arenas.subheaps()).append(',')
+                    .append(sample.process.unaccounted()).append('\n');
+            java.nio.file.Files.write(this.incrementalLog,
+                    sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (Throwable t) {
+            // best effort - never let logging break the investigation
+        }
+    }
+
+    /** Progress line for an investigation already in flight. */
+    public String progress() {
+        if (this.samples.isEmpty()) {
+            return "starting up";
+        }
+        Sample first = this.samples.get(0);
+        Sample last = this.samples.get(this.samples.size() - 1);
+        long mins = (last.timestamp - first.timestamp) / 60000;
+        return String.format("%d samples over %d minutes, RSS %s -> %s, unaccounted %s -> %s",
+                this.samples.size(), mins,
+                FormatUtil.formatBytes(first.process.rss()), FormatUtil.formatBytes(last.process.rss()),
+                FormatUtil.formatBytes(first.process.unaccounted()),
+                FormatUtil.formatBytes(last.process.unaccounted()));
     }
 
     public int sampleCount() {
@@ -200,10 +263,16 @@ public final class OffHeapInvestigation {
         out.add("");
 
         // NMT diff is the discriminator between "the JVM did this" and "something else did".
-        String nmtDiff = DiagnosticCommand.execute("VM.native_memory", "summary.diff", "scale=MB");
+        String nmtDiff = this.nmtBaselineOk
+                ? DiagnosticCommand.execute("VM.native_memory", "summary.diff", "scale=MB") : "";
         long nmtGrowth = -1;
         out.add("--- NMT categories that changed ---");
-        if (nmtDiff.startsWith(DiagnosticCommand.UNAVAILABLE) || nmtDiff.contains("not enabled")) {
+        if (!this.nmtBaselineOk) {
+            out.add("  NMT baseline was not set at the start of this run, so a diff here would");
+            out.add("  compare against an older baseline and report the wrong deltas. Skipped.");
+            nmtDiff = "";
+        }
+        if (nmtDiff.isEmpty() || nmtDiff.startsWith(DiagnosticCommand.UNAVAILABLE) || nmtDiff.contains("not enabled")) {
             out.add("  NMT unavailable. Add -XX:NativeMemoryTracking=summary and restart -");
             out.add("  without it there is no way to tell JVM-internal growth from external.");
         } else {
