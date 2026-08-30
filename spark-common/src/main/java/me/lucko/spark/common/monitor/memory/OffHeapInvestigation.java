@@ -105,8 +105,7 @@ public final class OffHeapInvestigation {
      * <p>The NMT baseline matters more than it looks: {@code summary.diff} against it is the only
      * way to see which JVM region grew, as opposed to how large each is now. A region that is
      * merely big has usually always been big.</p>
-     */
-    /**
+     *
      * @param incrementalLog file to append each sample to, or null. Written as the run proceeds so
      *                       a crash mid-investigation still leaves the data behind - which matters
      *                       most on exactly the servers worth investigating, since an OOM during a
@@ -176,11 +175,6 @@ public final class OffHeapInvestigation {
     }
 
     /** Progress line for an investigation already in flight. */
-    /** True once the opening sample landed - lets the caller detect a failed start. */
-    public boolean started() {
-        return !this.samples.isEmpty();
-    }
-
     public String progress() {
         if (this.samples.isEmpty()) {
             return "starting up";
@@ -191,8 +185,25 @@ public final class OffHeapInvestigation {
         return String.format("%d samples over %d minutes, RSS %s -> %s, unaccounted %s -> %s",
                 this.samples.size(), mins,
                 FormatUtil.formatBytes(first.process.rss()), FormatUtil.formatBytes(last.process.rss()),
-                FormatUtil.formatBytes(first.process.unaccounted()),
-                FormatUtil.formatBytes(last.process.unaccounted()));
+                signed(first.process.unaccounted()), signed(last.process.unaccounted()));
+    }
+
+    /**
+     * Formats a signed byte count.
+     *
+     * <p>{@link FormatUtil#formatBytes} renders everything at or below zero as "0 bytes", and
+     * unaccounted() is legitimately negative when committed heap exceeds resident memory, as well
+     * as returning Long.MIN_VALUE when RSS is unreadable. Printing either as zero hides the very
+     * condition the reader needs to notice.</p>
+     */
+    private static String signed(long bytes) {
+        if (bytes == Long.MIN_VALUE) {
+            return "unavailable";
+        }
+        if (bytes == 0) {
+            return "0 bytes";
+        }
+        return (bytes < 0 ? "-" : "") + FormatUtil.formatBytes(Math.abs(bytes));
     }
 
     public int sampleCount() {
@@ -246,7 +257,14 @@ public final class OffHeapInvestigation {
         long nmtThreadCommitted = DiagnosticCommand.getNmtCommitted("Thread");
         long stackCorrection = 0;
         if (nmtThreadCommitted >= 0) {
-            long estimated = (long) last.threads * 1024L * 1024L;
+            // Must use the SAME stack size unaccounted() used, not a hardcoded 1 MiB. That method
+            // prefers the actual -Xss from the VM option and only falls back to 1 MiB, so assuming
+            // 1 MiB here computes a correction against a figure that was never used - on a server
+            // running -Xss2m with several hundred threads the "fix" is wrong by more than the
+            // error it corrects.
+            long stackSize = last.process.threadStackSize() > 0
+                    ? last.process.threadStackSize() : 1024L * 1024L;
+            long estimated = (long) last.threads * stackSize;
             stackCorrection = estimated - nmtThreadCommitted;
         }
 
@@ -257,7 +275,12 @@ public final class OffHeapInvestigation {
         // Total, not arena-only: a leak made of large blocks lives in the mmap total and would
         // otherwise register as zero arena growth while the process grew by gigabytes.
         long arenaGrowth = last.arenas.totalHeldBytes() - first.arenas.totalHeldBytes();
-        long unaccountedGrowth = last.process.unaccounted() - first.process.unaccounted();
+        // unaccounted() returns Long.MIN_VALUE when RSS is unreadable; subtracting that overflows
+        // into a meaningless number that then drives every verdict below.
+        boolean unaccountedUsable = last.process.unaccounted() != Long.MIN_VALUE
+                && first.process.unaccounted() != Long.MIN_VALUE;
+        long unaccountedGrowth = unaccountedUsable
+                ? last.process.unaccounted() - first.process.unaccounted() : 0;
 
         // RSS counts file-backed resident pages too: mapped jars, shared objects, and any file a
         // plugin mmaps. Those are not leaked native memory, but unaccounted() subtracts only heap,
@@ -268,7 +291,8 @@ public final class OffHeapInvestigation {
         Long shmemResident = last.process.smapsRollup().get("Pss_Shmem");
         long fileBacked = fileResident == null ? 0 : fileResident;
 
-        long correctedUnaccounted = last.process.unaccounted() + stackCorrection - fileBacked;
+        long correctedUnaccounted = unaccountedUsable
+                ? last.process.unaccounted() + stackCorrection - fileBacked : 0;
 
         out.add("=== OFF-HEAP INVESTIGATION ===");
         out.add(String.format("Duration: %.2f hours, %d samples", hours, this.samples.size()));
@@ -283,7 +307,8 @@ public final class OffHeapInvestigation {
         out.add(rate("  JVM non-heap", nonHeapGrowth, hours));
         out.add(rate("  NIO direct buffers", directGrowth, hours));
         out.add(rate("  glibc arenas (malloc_info)", arenaGrowth, hours));
-        out.add(rate("Unaccounted", unaccountedGrowth, hours));
+        out.add(unaccountedUsable ? rate("Unaccounted", unaccountedGrowth, hours)
+                : "  Unaccounted                  unavailable (could not read RSS)");
         if (stackCorrection > 64L * 1024 * 1024 || fileBacked > 64L * 1024 * 1024) {
             out.add("  Corrections to the unaccounted figure:");
             if (stackCorrection > 0) {
