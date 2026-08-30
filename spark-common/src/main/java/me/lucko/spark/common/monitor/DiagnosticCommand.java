@@ -110,7 +110,13 @@ public enum DiagnosticCommand {
         Boolean cached = nmtEnabled;
         if (cached == null) {
             String output = execute("VM.native_memory", "summary");
-            cached = !output.startsWith(UNAVAILABLE) && !output.contains("Native memory tracking is not enabled");
+            // Only cache a definitive answer. A transient MBean failure returns UNAVAILABLE, and
+            // caching that as "NMT is off" would disable every NMT-backed feature for the rest of
+            // the server's uptime on the strength of one failed call.
+            if (output.startsWith(UNAVAILABLE)) {
+                return false;
+            }
+            cached = !output.contains("Native memory tracking is not enabled");
             nmtEnabled = cached;
         }
         return cached;
@@ -132,9 +138,21 @@ public enum DiagnosticCommand {
         if (summary.startsWith(UNAVAILABLE) || summary.contains("not enabled")) {
             return -1;
         }
+        // Match the category at the START of the entry, not anywhere in the line. A substring
+        // test lets "Class" match a line describing something else that merely mentions it, and
+        // the first hit wins - so the wrong figure is returned with no indication anything is off.
+        String needle = "-" ;
         for (String line : summary.split("\n")) {
             String trimmed = line.trim();
-            if (!trimmed.startsWith("-") || !trimmed.contains(category)) {
+            if (!trimmed.startsWith(needle)) {
+                continue;
+            }
+            String name = trimmed.substring(1).trim();
+            int paren = name.indexOf('(');
+            if (paren > 0) {
+                name = name.substring(0, paren).trim();
+            }
+            if (!name.equals(category)) {
                 continue;
             }
             java.util.regex.Matcher m = java.util.regex.Pattern

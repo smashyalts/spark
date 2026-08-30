@@ -106,7 +106,9 @@ public final class GlibcArenaInfo {
      * "one of these few threads", which is a question a thread dump can then answer.</p>
      */
     public Map<Integer, long[]> perArena() {
-        return this.perArena;
+        // Unmodifiable: this returned the live map, and the long[] values inside it are mutable
+        // regardless, so a caller could silently corrupt a captured measurement.
+        return java.util.Collections.unmodifiableMap(this.perArena);
     }
 
     /**
@@ -190,6 +192,8 @@ public final class GlibcArenaInfo {
 
         // The top-level totals sit AFTER the last </heap>. Parsing them from the whole document
         // would match the first per-heap element instead, so the heap blocks are removed first.
+        // Strip heap blocks first: the same element names appear inside them, and matching against
+        // the whole document would take the first per-heap value instead of the top-level total.
         String topLevel = HEAP_BLOCK.matcher(xml).replaceAll("");
         long mmapBytes = 0;
         long mmapCount = 0;

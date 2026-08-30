@@ -77,8 +77,18 @@ public final class SingleTickSource {
         return false;
     }
 
-    /** True once some thread has claimed the source - used to report multi-region detection. */
+    /**
+     * True once some thread has claimed the source.
+     *
+     * <p>Kept for callers that want to distinguish "no ticks yet" from "ticking normally" - the
+     * two are otherwise indistinguishable from a zero tick count.</p>
+     */
     public boolean claimed() {
         return this.owner != null;
+    }
+
+    /** The thread currently admitted, or null. Useful when reporting which region is measured. */
+    public Thread owner() {
+        return this.owner;
     }
 }
