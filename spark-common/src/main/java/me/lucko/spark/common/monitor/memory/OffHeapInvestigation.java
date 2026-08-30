@@ -308,16 +308,24 @@ public final class OffHeapInvestigation {
         long fdGrowth = last.openFds - first.openFds;
         long classGrowth = last.loadedClasses - first.loadedClasses;
         int threadGrowth = last.threads - first.threads;
-        boolean fdLeak = first.openFds > 0 && fdGrowth > 200;
-        boolean classLeak = classGrowth > 5000;
-        boolean threadLeak = threadGrowth > 100;
+
+        // Magnitude alone cannot distinguish a leak from warm-up, and using it produces confident
+        // false alarms on healthy servers: lazy class loading routinely adds eight thousand classes
+        // over a few hours, and a busy server's socket count swings by hundreds as players come and
+        // go. What separates them is the SHAPE. Warm-up decelerates as the working set is reached;
+        // a leak keeps the same slope. So the second half of the run is compared against the first,
+        // and only sustained growth is called a leak.
+        boolean fdLeak = first.openFds > 0 && fdGrowth > 200 && sustained(SampleField.FDS);
+        boolean classLeak = classGrowth > 5000 && sustained(SampleField.CLASSES);
+        boolean threadLeak = threadGrowth > 100 && sustained(SampleField.THREADS);
 
         if (fdLeak) {
             out.add(String.format("  FILE DESCRIPTOR LEAK: +%d over %.1f hours (%.0f/hour).",
                     fdGrowth, hours, fdGrowth / hours));
-            if (fdLimit > 0) {
+            double fdPerHour = fdGrowth / hours;
+            if (fdLimit > 0 && fdPerHour > 1 && !windowTooShort(hours)) {
                 out.add(String.format("  At this rate the %d limit is reached in about %.0f hours.",
-                        fdLimit, (fdLimit - last.openFds) / Math.max(1.0, fdGrowth / hours)));
+                        fdLimit, (fdLimit - last.openFds) / fdPerHour));
             }
             out.add("  Something opens files or sockets without closing them.");
         }
@@ -332,7 +340,12 @@ public final class OffHeapInvestigation {
             out.add("  spawning raw threads instead of using a pool.");
         }
         if (!fdLeak && !classLeak && !threadLeak) {
-            out.add("  No descriptor, classloader or thread leak evident.");
+            if (fdGrowth > 200 || classGrowth > 5000 || threadGrowth > 100) {
+                out.add("  These grew, but the growth DECELERATED across the window - that is");
+                out.add("  warm-up reaching a working set, not a leak. Re-run for longer if unsure.");
+            } else {
+                out.add("  No descriptor, classloader or thread leak evident.");
+            }
         }
         out.add("");
 
@@ -420,6 +433,54 @@ public final class OffHeapInvestigation {
                 javaHeapLeak, floorRise, last, hours,
                 fdLeak ? fdGrowth : 0, classLeak ? classGrowth : 0, threadLeak ? threadGrowth : 0);
         return out;
+    }
+
+    private enum SampleField { FDS, CLASSES, THREADS }
+
+    private static long fieldOf(Sample s, SampleField f) {
+        switch (f) {
+            case FDS: return s.openFds;
+            case CLASSES: return s.loadedClasses;
+            default: return s.threads;
+        }
+    }
+
+    /**
+     * True when growth in the second half of the run matches the first half.
+     *
+     * <p>A leak holds its slope; warm-up flattens. Requiring the later rate to be at least 60% of
+     * the earlier one lets ordinary lazy loading fall below the bar while a genuine leak, which has
+     * no reason to slow down, stays above it.</p>
+     */
+    private boolean sustained(SampleField field) {
+        int n = this.samples.size();
+        if (n < 4) {
+            return false; // too few points to judge shape - do not guess
+        }
+        int mid = n / 2;
+        Sample a = this.samples.get(0);
+        Sample b = this.samples.get(mid);
+        Sample c = this.samples.get(n - 1);
+
+        double firstHalfHours = (b.timestamp - a.timestamp) / 3_600_000d;
+        double secondHalfHours = (c.timestamp - b.timestamp) / 3_600_000d;
+        if (firstHalfHours <= 0 || secondHalfHours <= 0) {
+            return false;
+        }
+
+        // Overall direction must be up. Without this, a counter that fell and then ticked up by
+        // noise satisfied the "accelerating" case below and was reported as a leak - a shrinking
+        // thread count was being called a thread leak in isolation.
+        if (fieldOf(c, field) <= fieldOf(a, field)) {
+            return false;
+        }
+
+        double earlyRate = (fieldOf(b, field) - fieldOf(a, field)) / firstHalfHours;
+        double lateRate = (fieldOf(c, field) - fieldOf(b, field)) / secondHalfHours;
+        if (lateRate <= 0) {
+            return false;
+        }
+        return earlyRate <= 0 || lateRate >= earlyRate * 0.6;
     }
 
     private void appendMappingDelta(List<String> out, Sample first, Sample last) {
