@@ -245,7 +245,17 @@ public final class OffHeapInvestigation {
         // otherwise register as zero arena growth while the process grew by gigabytes.
         long arenaGrowth = last.arenas.totalHeldBytes() - first.arenas.totalHeldBytes();
         long unaccountedGrowth = last.process.unaccounted() - first.process.unaccounted();
-        long correctedUnaccounted = last.process.unaccounted() + stackCorrection;
+
+        // RSS counts file-backed resident pages too: mapped jars, shared objects, and any file a
+        // plugin mmaps. Those are not leaked native memory, but unaccounted() subtracts only heap,
+        // non-heap, direct buffers and stacks, so every one of them is charged to the leak. On a
+        // server with dozens of plugin jars and a mapped world-edit clipboard that is hundreds of
+        // megabytes of phantom.
+        Long fileResident = last.process.smapsRollup().get("Pss_File");
+        Long shmemResident = last.process.smapsRollup().get("Pss_Shmem");
+        long fileBacked = fileResident == null ? 0 : fileResident;
+
+        long correctedUnaccounted = last.process.unaccounted() + stackCorrection - fileBacked;
 
         out.add("=== OFF-HEAP INVESTIGATION ===");
         out.add(String.format("Duration: %.2f hours, %d samples", hours, this.samples.size()));
@@ -261,12 +271,41 @@ public final class OffHeapInvestigation {
         out.add(rate("  NIO direct buffers", directGrowth, hours));
         out.add(rate("  glibc arenas (malloc_info)", arenaGrowth, hours));
         out.add(rate("Unaccounted", unaccountedGrowth, hours));
-        if (stackCorrection > 64L * 1024 * 1024) {
-            out.add(String.format("  NOTE: thread stacks over-counted by %s (estimate vs NMT actual).",
-                    FormatUtil.formatBytes(stackCorrection)));
-            out.add(String.format("  True unaccounted is therefore about %s, not %s.",
-                    FormatUtil.formatBytes(correctedUnaccounted),
+        if (stackCorrection > 64L * 1024 * 1024 || fileBacked > 64L * 1024 * 1024) {
+            out.add("  Corrections to the unaccounted figure:");
+            if (stackCorrection > 0) {
+                out.add(String.format("    thread stacks over-counted by %s (estimate vs NMT actual)",
+                        FormatUtil.formatBytes(stackCorrection)));
+            }
+            if (fileBacked > 0) {
+                out.add(String.format("    file-backed resident (jars, .so, mapped files): %s - not a leak",
+                        FormatUtil.formatBytes(fileBacked)));
+            }
+            if (shmemResident != null && shmemResident > 0) {
+                out.add(String.format("    shared/shmem resident: %s (ZGC keeps its heap here)",
+                        FormatUtil.formatBytes(shmemResident)));
+            }
+            out.add(String.format("    TRUE unaccounted: about %s (reported %s)",
+                    FormatUtil.formatBytes(Math.max(0, correctedUnaccounted)),
                     FormatUtil.formatBytes(last.process.unaccounted())));
+
+            // Independent cross-check. Pss_Anon is the kernel's own count of anonymous resident
+            // memory, so subtracting the JVM's anonymous regions from it reaches the same figure by
+            // a different route. Agreement means the arithmetic above is sound; disagreement means
+            // one of the inputs is wrong, and saying so is far better than quietly presenting a
+            // single number that no other measurement supports.
+            Long anon = last.process.smapsRollup().get("Pss_Anon");
+            if (anon != null && anon > 0) {
+                long realStacks = nmtThreadCommitted >= 0 ? nmtThreadCommitted
+                        : (long) last.threads * 1024L * 1024L;
+                long viaAnon = anon - last.process.nonHeapCommitted() - last.process.directUsed() - realStacks;
+                out.add(String.format("    cross-check via Pss_Anon: %s", FormatUtil.formatBytes(viaAnon)));
+                long diff = Math.abs(viaAnon - correctedUnaccounted);
+                if (correctedUnaccounted > 0 && diff > correctedUnaccounted / 10) {
+                    out.add("    WARNING: the two methods disagree by more than 10% - treat both");
+                    out.add("    figures as approximate and prefer --diagnose, which reads glibc directly.");
+                }
+            }
         }
         out.add("");
 
