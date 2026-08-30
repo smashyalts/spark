@@ -358,9 +358,9 @@ public class NativeMemoryModule implements CommandModule {
      * commands quoting three different numbers for the same quantity is worse than any one of them
      * being slightly off, because it destroys the reader's ability to compare across runs.</p>
      */
-    private void appendUnaccountedCorrections(CommandResponseHandler resp, ProcessMemorySnapshot s, long unaccounted) {
+    private long appendUnaccountedCorrections(CommandResponseHandler resp, ProcessMemorySnapshot s, long unaccounted) {
         if (unaccounted == Long.MIN_VALUE || unaccounted <= 0) {
-            return;
+            return unaccounted;
         }
         long corrected = unaccounted;
         List<String> notes = new ArrayList<>();
@@ -388,12 +388,13 @@ public class NativeMemoryModule implements CommandModule {
         }
 
         if (notes.isEmpty()) {
-            return;
+            return unaccounted;
         }
         for (String note : notes) {
             resp.replyPrefixed(text("    - " + note, DARK_GRAY));
         }
         resp.replyPrefixed(text("    corrected unaccounted: " + formatSigned(corrected), GRAY));
+        return corrected;
     }
 
     private void reportDiff(CommandResponseHandler resp, ProcessMemorySnapshot from, ProcessMemorySnapshot to) {
@@ -591,17 +592,35 @@ public class NativeMemoryModule implements CommandModule {
         }
 
         long after = ProcessMemory.getResidentSetSize();
-        long returned = Math.max(0, before - after);
+        long delta = before - after;
 
         resp.replyPrefixed(entry("Resident before", FormatUtil.formatBytes(before)));
         resp.replyPrefixed(entry("Resident after", FormatUtil.formatBytes(after)));
-        resp.replyPrefixed(entry("Returned to the OS", FormatUtil.formatBytes(returned)));
+        resp.replyPrefixed(entry("Change", formatSigned(-delta)));
 
-        if (returned > 512L * 1024 * 1024) {
-            resp.replyPrefixed(text("A large return means glibc was holding freed memory rather than a plugin", YELLOW));
-            resp.replyPrefixed(text("leaking it. Set MALLOC_ARENA_MAX=2 to stop it accumulating.", YELLOW));
+        if (delta < 0) {
+            // Clamping this to zero previously turned a measurement artifact into a finding: on a
+            // busy server ordinary allocation during the trim can outweigh what was returned, and
+            // the command would announce "the memory is genuinely in use" on that basis alone.
+            resp.replyPrefixed(text("Resident size GREW during the trim - the process allocated faster than", GRAY));
+            resp.replyPrefixed(text("the trim released. This says nothing either way; retry when quieter.", GRAY));
+            return;
+        }
+
+        // Judged against what glibc actually holds, not a fixed byte count. 512 MB is decisive on
+        // a 5 GB process and noise on a 90 GB one.
+        GlibcArenaInfo arenas = GlibcArenaInfo.capture();
+        long held = arenas.isAvailable() ? arenas.totalHeldBytes() : 0;
+        boolean large = held > 0 ? delta * 4 > held : delta > 512L * 1024 * 1024;
+
+        if (large) {
+            resp.replyPrefixed(text("A large share of what glibc held was returned - it was holding freed", YELLOW));
+            resp.replyPrefixed(text("memory, not leaking it. Set MALLOC_ARENA_MAX=2 to stop it accumulating.", YELLOW));
+        } else if (held > 0) {
+            resp.replyPrefixed(text(String.format("Only %s of the %s glibc holds was returned - the rest is live.",
+                    FormatUtil.formatBytes(delta), FormatUtil.formatBytes(held)), GRAY));
         } else {
-            resp.replyPrefixed(text("Little was returned - the memory is genuinely in use by something.", GRAY));
+            resp.replyPrefixed(text("Little was returned - the memory appears to be genuinely in use.", GRAY));
         }
     }
 
@@ -612,6 +631,9 @@ public class NativeMemoryModule implements CommandModule {
             if (lower.contains("mx") || lower.contains("ms") || lower.contains("direct")
                     || lower.contains("nativememory") || lower.contains("metaspace")
                     || lower.contains("codecache") || lower.contains("stack")
+                    // -Xss is the actual spelling; "stack" alone never matches it, so the one
+                    // setting the thread-stack corrections depend on was never displayed.
+                    || lower.startsWith("-xss") || lower.startsWith("-xmn")
                     || lower.contains("pretouch") || lower.contains("gc")) {
                 resp.replyPrefixed(text("    " + argument, GRAY));
             }
@@ -749,7 +771,7 @@ public class NativeMemoryModule implements CommandModule {
                     .append(s.nettyDirect()).append(',')
                     .append(s.threads()).append(',')
                     .append(s.loadedClasses()).append(',')
-                    .append(s.unaccounted()).append(',')
+                    .append(s.unaccounted() == Long.MIN_VALUE ? "" : String.valueOf(s.unaccounted())).append(',')
                     .append(cgroupCurrent == null ? -1 : cgroupCurrent).append('\n');
 
             Files.write(file, sb.toString().getBytes(StandardCharsets.UTF_8),
@@ -778,10 +800,15 @@ public class NativeMemoryModule implements CommandModule {
 
         resp.replyPrefixed(text("Off-heap diagnosis", GOLD));
         resp.replyPrefixed(entry("Resident set size", formatSigned(s.rss())));
+        long stacks = (long) s.threads() * (s.threadStackSize() > 0 ? s.threadStackSize() : 1024L * 1024L);
         resp.replyPrefixed(entry("Accounted by the JVM", FormatUtil.formatBytes(
-                s.heapCommitted() + s.nonHeapCommitted() + s.directUsed())));
+                s.heapCommitted() + s.nonHeapCommitted() + s.directUsed() + stacks)
+                + " (incl. " + FormatUtil.formatBytes(stacks) + " thread stacks)"));
         resp.replyPrefixed(entry("Unaccounted", formatSigned(unaccounted)));
-        appendUnaccountedCorrections(resp, s, unaccounted);
+        // The verdict must reason about the SAME figure printed to the reader. Previously the
+        // corrections were displayed and then ignored, so the conclusion could contradict the
+        // number directly above it.
+        long correctedUnaccounted = appendUnaccountedCorrections(resp, s, unaccounted);
 
         Long lazyFree = s.smapsRollup().get("LazyFree");
         if (lazyFree != null && lazyFree > 0) {
@@ -820,9 +847,9 @@ public class NativeMemoryModule implements CommandModule {
 
         resp.replyPrefixed(text("Verdict", GOLD));
         long held = arenas.totalHeldBytes();
-        if (unaccounted <= 0 || held * 2 <= unaccounted) {
+        if (correctedUnaccounted <= 0 || held * 2 <= correctedUnaccounted) {
             resp.replyPrefixed(text("    glibc holds " + FormatUtil.formatBytes(held) + " of "
-                    + formatSigned(unaccounted) + " unaccounted - not the main consumer.", GRAY));
+                    + formatSigned(correctedUnaccounted) + " unaccounted - not the main consumer.", GRAY));
             resp.replyPrefixed(text("    Look elsewhere: --nmt-diff for JVM regions, --maps for mapping", GRAY));
             resp.replyPrefixed(text("    shape and loaded native libraries.", GRAY));
         } else if (arenas.freeRatio() > 0.4) {
@@ -876,8 +903,9 @@ public class NativeMemoryModule implements CommandModule {
         }
         for (String expensive : EXPENSIVE_COMMANDS) {
             if (lower.startsWith(expensive.toLowerCase())) {
-                resp.replyPrefixed(text("Note: " + command + " walks the whole heap and can pause a large", YELLOW));
-                resp.replyPrefixed(text("server noticeably. Running it anyway.", YELLOW));
+                resp.replyPrefixed(text("Note: " + command + " walks a large structure or brings every", YELLOW));
+                resp.replyPrefixed(text("thread to a safepoint, and can pause a big server noticeably.", YELLOW));
+                break;
             }
         }
 
@@ -948,19 +976,10 @@ public class NativeMemoryModule implements CommandModule {
                 new SparkThreadFactory("spark-offheap-investigation", true));
         this.investigationExecutor = executor;
 
-        executor.execute(() -> {
-            try {
-                inv.begin(platform.getPlugin().getPluginDirectory()
-                        .resolve("investigation-live-" + FILE_STAMP.format(Instant.now()) + ".csv"));
-            } catch (Throwable t) {
-                // Clear the handle, or the command reports "already running" for the full duration
-                // while collecting nothing at all.
-                platform.getPlugin().log(Level.WARNING, "Investigation failed to start", t);
-                cancelInvestigation();
-                resp.replyPrefixed(text("Investigation failed to start - see the server log.", RED));
-            }
-        });
-
+        // Schedule everything BEFORE the opening sample runs. If begin() fails it cancels the
+        // investigation, which shuts this executor down - and the two schedule calls below would
+        // then be rejected, surfacing as an exception on the command thread rather than the clean
+        // failure message the catch is trying to produce.
         this.investigationTask = executor.scheduleAtFixedRate(() -> {
             try {
                 inv.sample();
@@ -968,6 +987,17 @@ public class NativeMemoryModule implements CommandModule {
                 platform.getPlugin().log(Level.WARNING, "Investigation sample failed", t);
             }
         }, intervalMinutes, intervalMinutes, TimeUnit.MINUTES);
+
+        executor.execute(() -> {
+            try {
+                inv.begin(platform.getPlugin().getPluginDirectory()
+                        .resolve("investigation-live-" + FILE_STAMP.format(Instant.now()) + ".csv"));
+            } catch (Throwable t) {
+                platform.getPlugin().log(Level.WARNING, "Investigation failed to start", t);
+                cancelInvestigation();
+                resp.replyPrefixed(text("Investigation failed to start - see the server log.", RED));
+            }
+        });
 
         executor.schedule(() -> {
             try {
