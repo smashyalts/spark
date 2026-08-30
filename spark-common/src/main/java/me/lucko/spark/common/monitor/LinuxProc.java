@@ -83,6 +83,12 @@ public enum LinuxProc {
     SELF_MAPS("/proc/self/maps"),
 
     /**
+     * Resource limits for the current process - used to warn before a descriptor leak hits the
+     * ceiling rather than after. // fork
+     */
+    SELF_LIMITS("/proc/self/limits"),
+
+    /**
      * Current memory usage of the container cgroup, v2 layout. Includes page cache. // fork
      */
     CGROUP_V2_MEMORY_CURRENT("/sys/fs/cgroup/memory.current"),

@@ -254,6 +254,39 @@ public enum ProcessMemory {
     }
 
     /**
+     * Number of open file descriptors, or -1 if unavailable.
+     *
+     * <p>A descriptor leak is a leak this tool would otherwise miss entirely: each leaked fd costs
+     * only a little kernel memory, so RSS barely moves, but the process dies at the ulimit with an
+     * error that names nothing useful. Plugins that open files or sockets without closing them in
+     * a finally block are the usual cause, and the count climbing steadily is unambiguous.</p>
+     */
+    public static long getOpenFileDescriptors() {
+        try {
+            java.io.File dir = new java.io.File("/proc/self/fd");
+            String[] entries = dir.list();
+            return entries == null ? -1 : entries.length;
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    /** Soft limit on open descriptors from /proc/self/limits, or -1. */
+    public static long getFileDescriptorLimit() {
+        for (String line : LinuxProc.SELF_LIMITS.read()) {
+            if (line.startsWith("Max open files")) {
+                String[] parts = line.split("\\s+");
+                for (String part : parts) {
+                    if (part.matches("\\d+")) {
+                        return Long.parseLong(part);
+                    }
+                }
+            }
+        }
+        return -1;
+    }
+
+    /**
      * Detects a preloaded allocator replacing the system malloc, or null for plain glibc.
      *
      * <p>This matters because almost every piece of advice about native memory assumes glibc.

@@ -68,11 +68,28 @@ public final class OffHeapInvestigation {
         // a brand new one, and counted its whole size as growth instead of its delta.
         final Map<Long, long[]> mappings; // start address -> {resident bytes, mapped size}
 
-        Sample(long timestamp, ProcessMemorySnapshot process, GlibcArenaInfo arenas, Map<Long, long[]> mappings) {
+        // Leak classes that leave almost no trace in RSS, and so would be missed entirely by a
+        // memory-only investigation: descriptors exhaust a ulimit, classloaders accumulate through
+        // plugin reloads, threads pile up holding stacks. Each kills a server in its own way.
+        final long openFds;
+        final long loadedClasses;
+        final long unloadedClasses;
+        final int threads;
+        final long gcCount;
+        final long gcTimeMs;
+
+        Sample(long timestamp, ProcessMemorySnapshot process, GlibcArenaInfo arenas, Map<Long, long[]> mappings,
+               long openFds, long loadedClasses, long unloadedClasses, int threads, long gcCount, long gcTimeMs) {
             this.timestamp = timestamp;
             this.process = process;
             this.arenas = arenas;
             this.mappings = mappings;
+            this.openFds = openFds;
+            this.loadedClasses = loadedClasses;
+            this.unloadedClasses = unloadedClasses;
+            this.threads = threads;
+            this.gcCount = gcCount;
+            this.gcTimeMs = gcTimeMs;
         }
     }
 
@@ -122,7 +139,8 @@ public final class OffHeapInvestigation {
             StringBuilder sb = new StringBuilder();
             if (this.samples.size() == 1) {
                 sb.append("time,rss,heap_used,heap_committed,non_heap,nio_direct,")
-                        .append("glibc_held,glibc_free,arenas,subheaps,unaccounted\n");
+                        .append("glibc_held,glibc_free,arenas,subheaps,unaccounted,")
+                        .append("open_fds,loaded_classes,unloaded_classes,threads,gc_count,gc_time_ms\n");
             }
             sb.append(sample.timestamp).append(',')
                     .append(sample.process.rss()).append(',')
@@ -134,7 +152,13 @@ public final class OffHeapInvestigation {
                     .append(sample.arenas.freeBytes()).append(',')
                     .append(sample.arenas.arenas()).append(',')
                     .append(sample.arenas.subheaps()).append(',')
-                    .append(sample.process.unaccounted()).append('\n');
+                    .append(sample.process.unaccounted()).append(',')
+                    .append(sample.openFds).append(',')
+                    .append(sample.loadedClasses).append(',')
+                    .append(sample.unloadedClasses).append(',')
+                    .append(sample.threads).append(',')
+                    .append(sample.gcCount).append(',')
+                    .append(sample.gcTimeMs).append('\n');
             java.nio.file.Files.write(this.incrementalLog,
                     sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8),
                     java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
@@ -167,8 +191,24 @@ public final class OffHeapInvestigation {
         for (ProcessMemory.Mapping m : ProcessMemory.getMappings()) {
             mappings.put(m.start(), new long[]{m.rss(), m.size()});
         }
+        java.lang.management.ClassLoadingMXBean classes = java.lang.management.ManagementFactory.getClassLoadingMXBean();
+        long gcCount = 0;
+        long gcTime = 0;
+        for (java.lang.management.GarbageCollectorMXBean gc :
+                java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()) {
+            if (gc.getCollectionCount() > 0) {
+                gcCount += gc.getCollectionCount();
+            }
+            if (gc.getCollectionTime() > 0) {
+                gcTime += gc.getCollectionTime();
+            }
+        }
         return new Sample(System.currentTimeMillis(), ProcessMemorySnapshot.capture(),
-                GlibcArenaInfo.capture(), mappings);
+                GlibcArenaInfo.capture(), mappings,
+                ProcessMemory.getOpenFileDescriptors(),
+                classes.getLoadedClassCount(), classes.getUnloadedClassCount(),
+                java.lang.management.ManagementFactory.getThreadMXBean().getThreadCount(),
+                gcCount, gcTime);
     }
 
     /** Renders the full report. Returns the lines; the caller decides where they go. */
@@ -253,6 +293,49 @@ public final class OffHeapInvestigation {
         }
         out.add("");
 
+        // These four cost almost nothing in RSS and so are invisible to every other section here,
+        // yet each one takes a server down on its own schedule.
+        out.add("--- Other leak classes ---");
+        long fdLimit = ProcessMemory.getFileDescriptorLimit();
+        out.add(String.format("  open file descriptors: %d -> %d%s", first.openFds, last.openFds,
+                fdLimit > 0 ? " (limit " + fdLimit + ")" : ""));
+        out.add(String.format("  live classes: %d -> %d (unloaded %d -> %d)",
+                first.loadedClasses, last.loadedClasses, first.unloadedClasses, last.unloadedClasses));
+        out.add(String.format("  threads: %d -> %d", first.threads, last.threads));
+        out.add(String.format("  GC collections: %d over this window, %d ms total",
+                last.gcCount - first.gcCount, last.gcTimeMs - first.gcTimeMs));
+
+        long fdGrowth = last.openFds - first.openFds;
+        long classGrowth = last.loadedClasses - first.loadedClasses;
+        int threadGrowth = last.threads - first.threads;
+        boolean fdLeak = first.openFds > 0 && fdGrowth > 200;
+        boolean classLeak = classGrowth > 5000;
+        boolean threadLeak = threadGrowth > 100;
+
+        if (fdLeak) {
+            out.add(String.format("  FILE DESCRIPTOR LEAK: +%d over %.1f hours (%.0f/hour).",
+                    fdGrowth, hours, fdGrowth / hours));
+            if (fdLimit > 0) {
+                out.add(String.format("  At this rate the %d limit is reached in about %.0f hours.",
+                        fdLimit, (fdLimit - last.openFds) / Math.max(1.0, fdGrowth / hours)));
+            }
+            out.add("  Something opens files or sockets without closing them.");
+        }
+        if (classLeak) {
+            out.add(String.format("  CLASSLOADER LEAK: live classes +%d. Repeated plugin reloads that",
+                    classGrowth));
+            out.add("  leave old classloaders reachable will do this, and it grows metaspace, not heap.");
+        }
+        if (threadLeak) {
+            out.add(String.format("  THREAD LEAK: +%d threads. Each holds a stack; check for plugins",
+                    threadGrowth));
+            out.add("  spawning raw threads instead of using a pool.");
+        }
+        if (!fdLeak && !classLeak && !threadLeak) {
+            out.add("  No descriptor, classloader or thread leak evident.");
+        }
+        out.add("");
+
         out.add("--- glibc allocator, start vs end ---");
         out.add(String.format("  arenas   %d -> %d", first.arenas.arenas(), last.arenas.arenas()));
         out.add(String.format("  subheaps %d -> %d", first.arenas.subheaps(), last.arenas.subheaps()));
@@ -334,7 +417,8 @@ public final class OffHeapInvestigation {
 
         out.add("--- VERDICT ---");
         appendVerdict(out, rssGrowth, unaccountedGrowth, arenaGrowth, nmtGrowth, heapGrowth,
-                javaHeapLeak, floorRise, last, hours);
+                javaHeapLeak, floorRise, last, hours,
+                fdLeak ? fdGrowth : 0, classLeak ? classGrowth : 0, threadLeak ? threadGrowth : 0);
         return out;
     }
 
@@ -405,12 +489,14 @@ public final class OffHeapInvestigation {
 
     private void appendVerdict(List<String> out, long rssGrowth, long unaccountedGrowth,
                                long arenaGrowth, long nmtGrowth, long heapGrowth,
-                               boolean javaHeapLeak, long floorRise, Sample last, double hours) {
+                               boolean javaHeapLeak, long floorRise, Sample last, double hours,
+                               long fdGrowth, long classGrowth, int threadGrowth) {
         double perHour = rssGrowth / hours;
 
         // Rate, not absolute size. A fixed byte threshold calls a slow leak "no growth" over a
         // short window and calls normal warm-up a leak over a long one.
-        if (perHour < 64L * 1024 * 1024 && !javaHeapLeak) {
+        boolean otherLeak = fdGrowth > 0 || classGrowth > 0 || threadGrowth > 0;
+        if (perHour < 64L * 1024 * 1024 && !javaHeapLeak && !otherLeak) {
             out.add(String.format("  Growing at only %s/hour - no meaningful leak in this window.",
                     FormatUtil.formatBytes((long) Math.max(0, perHour))));
             out.add("  Either there is nothing wrong, or the window was too quiet. Re-run under load.");
@@ -422,6 +508,16 @@ public final class OffHeapInvestigation {
         // Reported first and unconditionally: a rising post-GC floor is the most actionable
         // finding available, and only the verdict is echoed to chat - a Java leak buried in the
         // trend section above would never be seen by anyone who did not open the file.
+        if (fdGrowth > 0) {
+            out.add("  FILE DESCRIPTOR LEAK: +" + fdGrowth + " open descriptors. This kills the");
+            out.add("  server at the ulimit regardless of how much memory is free.");
+        }
+        if (classGrowth > 0) {
+            out.add("  CLASSLOADER LEAK: +" + classGrowth + " live classes - metaspace will exhaust.");
+        }
+        if (threadGrowth > 0) {
+            out.add("  THREAD LEAK: +" + threadGrowth + " threads, each holding a stack.");
+        }
         if (javaHeapLeak) {
             out.add("  JAVA OBJECT LEAK: the post-GC floor rose by " + FormatUtil.formatBytes(floorRise) + ".");
             out.add("  Objects are being retained and the collector cannot reclaim them. This is a");
