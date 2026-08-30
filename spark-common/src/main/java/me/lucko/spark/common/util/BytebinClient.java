@@ -22,10 +22,14 @@ package me.lucko.spark.common.util;
 
 import com.google.protobuf.AbstractMessageLite;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.zip.GZIPOutputStream;
@@ -71,13 +75,74 @@ public class BytebinClient {
 
             String key = connection.getHeaderField("Location");
             if (key == null) {
-                throw new IllegalStateException("Key not returned");
+                // no Location header means the server rejected the upload - it says why in the
+                // response, so carry that into the message rather than leaving the user with a
+                // bare "Key not returned" for what is usually a rate limit or a size limit
+                throw new IllegalStateException("Key not returned" + describeFailure(connection));
             }
             return new Content(key);
         } finally {
-            connection.getInputStream().close();
+            // getInputStream() itself throws when the server answered with an error status, which
+            // would replace whatever went wrong above with a bare IOException and lose the real
+            // reason for the failure. The error body has already been read by describeFailure in
+            // that case, so there is nothing left to do but let it go.
+            try (InputStream in = connection.getInputStream()) {
+                // just closing it
+            } catch (IOException e) {
+                // no readable response body
+            }
             connection.disconnect();
         }
+    }
+
+    /**
+     * Describes a failed request using the status code and the body the server sent with it.
+     *
+     * @param connection the failed connection
+     * @return a description to append to an exception message, or an empty string
+     */
+    private static String describeFailure(HttpURLConnection connection) {
+        StringBuilder sb = new StringBuilder();
+        try {
+            sb.append(" (http ").append(connection.getResponseCode()).append(")");
+        } catch (IOException e) {
+            return "";
+        }
+
+        InputStream errorStream = connection.getErrorStream();
+        if (errorStream == null) {
+            return sb.toString();
+        }
+
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(errorStream, StandardCharsets.UTF_8))) {
+            // Bounded: the body of an error response is a sentence, but nothing stops a
+            // misconfigured proxy from answering with a whole html page.
+            //
+            // readLine() rather than lines(): the stream wraps a read failure in an
+            // UncheckedIOException, which is not an IOException and would therefore escape this
+            // method and replace the exception it was called to describe - the exact failure this
+            // whole method exists to prevent.
+            StringBuilder body = new StringBuilder();
+            for (int i = 0; i < 5 && body.length() < 500; i++) {
+                String line = reader.readLine();
+                if (line == null) {
+                    break;
+                }
+                if (body.length() != 0) {
+                    body.append(' ');
+                }
+                body.append(line);
+            }
+
+            String text = body.toString().trim();
+            if (!text.isEmpty()) {
+                sb.append(": ").append(text.length() > 500 ? text.substring(0, 500) : text);
+            }
+        } catch (IOException e) {
+            // nothing more to add
+        }
+
+        return sb.toString();
     }
 
     public Content postContent(AbstractMessageLite<?, ?> proto, String contentType, String userAgentExtra) throws IOException {

@@ -21,7 +21,6 @@
 package me.lucko.spark.common.sampler.async;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap; // fork
 import me.lucko.spark.common.SparkPlatform;
 import me.lucko.spark.common.sampler.ThreadDumper;
 import me.lucko.spark.common.sampler.async.jfr.JfrReader;
@@ -135,6 +134,28 @@ public class AsyncProfilerJob {
     }
 
     /**
+     * fork - folds an additional collector's arguments into the start command.
+     *
+     * <p>Additional collectors may only contribute additive engine arguments. async-profiler's
+     * {@code event=} is single-valued: a second one replaces the first, so an extra collector
+     * emitting one would silently switch the primary collector off while the profile still
+     * reports that it contains that collector's data. There is no way to notice that from the
+     * result, so the only non-misleading failure mode is to refuse to start.</p>
+     *
+     * @param command the command being built
+     * @param arguments the additional collector's arguments
+     */
+    static void addExtraCollectorArguments(ImmutableList.Builder<String> command, Collection<String> arguments) {
+        for (String argument : arguments) {
+            if (argument.startsWith("event=")) {
+                throw new IllegalStateException("An additional sample collector specified '" + argument +
+                        "', but 'event=' is single-valued in async-profiler and would override the primary collector.");
+            }
+            command.add(argument);
+        }
+    }
+
+    /**
      * Checks to ensure that this job is still active.
      */
     private void checkActive() {
@@ -194,12 +215,14 @@ public class AsyncProfilerJob {
                     .addAll(this.sampleCollector.initArguments(this.access));
 
             // fork - fold in the arguments of any additional collectors so all of them are
-            // captured by the same recording. Note that HeapLeak DOES emit its own 'event=alloc'
-            // and async-profiler accepts the duplicate (last-wins), which is why SamplerBuilder
+            // captured by the same recording. The extra collectors deliberately contribute only
+            // additive engine arguments ('alloc=', 'nativemem='), never another 'event=', because
+            // 'event=' is single-valued and a second one would silently replace the primary
+            // collector's. They can still collide on 'alloc=', which is why SamplerBuilder
             // refuses --alloc combined with --heap-leaks: silently overriding the user's
             // --interval would be worse than refusing.
             for (SampleCollector<?> extra : this.extraCollectors) {
-                command.addAll(extra.initArguments(this.access));
+                addExtraCollectorArguments(command, extra.initArguments(this.access));
             }
 
             command.add("threads").add("jfr").add("file=" + this.outputFile.toString());
@@ -259,13 +282,6 @@ public class AsyncProfilerJob {
     }
 
     /**
-     * Aggregates the collected data.
-     */
-    public void aggregate(AsyncDataAggregator dataAggregator) {
-        aggregate(dataAggregator, ImmutableMap.of());
-    }
-
-    /**
      * fork - aggregates the collected data, routing each collector's events into its own
      * aggregator.
      *
@@ -287,26 +303,31 @@ public class AsyncProfilerJob {
         //
         // Verified: with a shared reader, the second collector saw 0 of 733,251 malloc events.
         // Re-opening costs a file handle and a re-parse, which is nothing next to being wrong.
-        try (JfrReader reader = new JfrReader(this.outputFile)) {
-            readSegments(reader, this.sampleCollector, dataAggregator);
-        } catch (Exception e) {
-            throw wrapParsingException(e);
-        }
-
-        for (Map.Entry<SampleCollector<?>, AsyncDataAggregator> entry : extraAggregators.entrySet()) {
-            SampleCollector<?> collector = entry.getKey();
+        // fork - in a finally block, not at the end. A leak recording is written with
+        // 'nativemem=0' (every malloc) and routinely runs to gigabytes; leaving one behind on a
+        // parse failure would fill the disk of the server being diagnosed.
+        try {
             try (JfrReader reader = new JfrReader(this.outputFile)) {
-                if (collector instanceof SampleCollector.NativeMemory) {
-                    readNativeMemoryLeakSegments(reader, (SampleCollector.NativeMemory) collector, entry.getValue());
-                } else {
-                    readSegments(reader, collector, entry.getValue());
-                }
+                readSegments(reader, this.sampleCollector, dataAggregator);
             } catch (Exception e) {
                 throw wrapParsingException(e);
             }
-        }
 
-        deleteOutputFile();
+            for (Map.Entry<SampleCollector<?>, AsyncDataAggregator> entry : extraAggregators.entrySet()) {
+                SampleCollector<?> collector = entry.getKey();
+                try (JfrReader reader = new JfrReader(this.outputFile)) {
+                    if (collector instanceof SampleCollector.NativeMemory) {
+                        readNativeMemoryLeakSegments(reader, (SampleCollector.NativeMemory) collector, entry.getValue());
+                    } else {
+                        readSegments(reader, collector, entry.getValue());
+                    }
+                } catch (Exception e) {
+                    throw wrapParsingException(e);
+                }
+            }
+        } finally {
+            deleteOutputFile();
+        }
     }
 
     private RuntimeException wrapParsingException(Exception e) {
@@ -415,45 +436,7 @@ public class AsyncProfilerJob {
                 lastTime = event.time;
             }
 
-            if (event.size == 0) {
-                // a free
-                AddressState st = states.get(event.address);
-                if (st == null) {
-                    // free seen before its malloc - record the debt so the malloc cancels out
-                    // when it arrives, rather than being counted as a leak
-                    if (states.size() < MAX_TRACKED_ADDRESSES) {
-                        st = new AddressState();
-                        states.put(event.address, st);
-                    } else {
-                        capped = true;
-                        continue;
-                    }
-                }
-                st.balance--;
-                if (st.balance == 0 && st.time == 0L) {
-                    // fully settled and carries no outstanding allocation - drop it to keep the
-                    // map bounded by genuinely outstanding memory
-                    states.remove(event.address);
-                }
-            } else {
-                AddressState st = states.get(event.address);
-                if (st == null) {
-                    if (states.size() >= MAX_TRACKED_ADDRESSES) {
-                        capped = true;
-                        continue;
-                    }
-                    st = new AddressState();
-                    states.put(event.address, st);
-                }
-                st.balance++;
-                st.time = event.time;
-                st.tid = event.tid;
-                st.stackTraceId = event.stackTraceId;
-                st.size = event.size;
-                if (st.balance == 0) {
-                    states.remove(event.address);
-                }
-            }
+            capped |= !track(states, event);
         }
 
         if (capped) {
@@ -495,11 +478,57 @@ public class AsyncProfilerJob {
     }
 
     /**
+     * fork - applies one malloc or free event to the running net-count state.
+     *
+     * <p>An address whose balance returns to zero is dropped immediately. That is what keeps the
+     * map bounded by memory which is genuinely still outstanding, rather than by every address the
+     * process has ever touched: the overwhelming majority of allocations are freed promptly, and
+     * retaining their (by then meaningless) entries would grow the map with total allocation
+     * history - the precise unbounded growth this whole design exists to avoid.</p>
+     *
+     * <p>Dropping the details along with the entry is safe. A later malloc of the same address
+     * simply starts a fresh entry - which is also what makes address reuse come out right, since
+     * the retained details are always those of the allocation that is still outstanding. A later
+     * unmatched free starts one at -1, which is filtered out when the leaks are reported.</p>
+     *
+     * @return false if the address cap was hit and the event had to be dropped
+     */
+    static boolean track(Map<Long, AddressState> states, JfrReader.MallocEvent event) {
+        AddressState st = states.get(event.address);
+        if (st == null) {
+            if (states.size() >= MAX_TRACKED_ADDRESSES) {
+                return false;
+            }
+            st = new AddressState();
+            states.put(event.address, st);
+        }
+
+        if (event.size == 0) {
+            // a free. If this is the first we have seen of the address, the entry created above
+            // records the debt so the malloc cancels out when it arrives (async-profiler flushes
+            // per thread, so a free can genuinely be read before its own malloc) rather than
+            // being counted as a leak.
+            st.balance--;
+        } else {
+            st.balance++;
+            st.time = event.time;
+            st.tid = event.tid;
+            st.stackTraceId = event.stackTraceId;
+            st.size = event.size;
+        }
+
+        if (st.balance == 0) {
+            states.remove(event.address);
+        }
+        return true;
+    }
+
+    /**
      * Net malloc/free balance for one address, plus the details of the outstanding allocation.
      * Mutable and reused rather than reallocated per event - this map can hold millions of
      * entries and per-entry cost is what decides whether leak tracking fits in a server's heap.
      */
-    private static final class AddressState {
+    static final class AddressState {
         int balance;
         long time;
         int tid;

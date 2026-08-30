@@ -77,6 +77,11 @@ public class BukkitPlatformInfo implements PlatformInfo {
             // ignore
         }
 
-        return serverClass.getPackage().getName().split("\\.")[3];
+        // legacy CraftBukkit put the version in the package name (org.bukkit.craftbukkit.v1_8_R3);
+        // modern Paper does not, so the element may not be there. Returning null is fine - the
+        // minecraft version is optional in the proto - whereas an index out of bounds here would
+        // propagate out of the metadata gather and fail the entire export.
+        String[] packageParts = serverClass.getPackage().getName().split("\\.");
+        return packageParts.length > 3 ? packageParts[3] : null;
     }
 }

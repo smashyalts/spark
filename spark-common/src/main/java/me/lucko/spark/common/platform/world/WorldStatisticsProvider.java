@@ -76,12 +76,21 @@ public class WorldStatisticsProvider {
 
         WorldInfoProvider.GameRulesResult gameRules = this.provider.getGameRules();
         if (gameRules != null) {
-            gameRules.getRules().forEach((ruleName, rule) -> stats.addGameRules(WorldStatistics.GameRule.newBuilder()
-                    .setName(ruleName)
-                    .setDefaultValue(rule.getDefaultValue())
-                    .putAllWorldValues(rule.getWorldValues())
-                    .build()
-            ));
+            gameRules.getRules().forEach((ruleName, rule) -> {
+                WorldStatistics.GameRule.Builder builder = WorldStatistics.GameRule.newBuilder()
+                        .setName(ruleName)
+                        .putAllWorldValues(rule.getWorldValues());
+
+                // a rule recorded for a world without a default having been recorded for it leaves
+                // this null, and protobuf rejects a null string - which would take the entire
+                // world statistics section down with it rather than just this one field
+                String defaultValue = rule.getDefaultValue();
+                if (defaultValue != null) {
+                    builder.setDefaultValue(defaultValue);
+                }
+
+                stats.addGameRules(builder.build());
+            });
         }
 
         Collection<WorldInfoProvider.DataPackInfo> dataPacks = this.provider.getDataPacks();

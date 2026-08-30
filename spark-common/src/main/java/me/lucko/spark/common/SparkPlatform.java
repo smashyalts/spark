@@ -84,8 +84,9 @@ public class SparkPlatform {
     private final PlatformStatisticsProvider statisticsProvider;
     private final CommandManager commandManager;
     private final AtomicBoolean enabled = new AtomicBoolean(false);
-    private Map<String, GarbageCollectorStatistics> startupGcStatistics = ImmutableMap.of();
-    private long serverNormalOperationStartTime;
+    // written from the async task started in enable(), read from command threads
+    private volatile Map<String, GarbageCollectorStatistics> startupGcStatistics = ImmutableMap.of();
+    private volatile long serverNormalOperationStartTime;
 
     public SparkPlatform(SparkPlugin plugin) {
         this.plugin = plugin;
@@ -140,7 +141,7 @@ public class SparkPlatform {
             this.tickHook.addCallback((TickHook.Callback) this.tickStatistics);
             this.tickHook.start();
         }
-        if (this.tickReporter != null&& this.tickStatistics instanceof SparkTickStatistics) {
+        if (this.tickReporter != null && this.tickStatistics instanceof SparkTickStatistics) {
             this.tickReporter.addCallback((TickReporter.Callback) this.tickStatistics);
             this.tickReporter.start();
         }

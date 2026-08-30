@@ -26,6 +26,7 @@ import com.google.common.collect.SetMultimap;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -65,7 +66,9 @@ public class Arguments {
                     this.parsedArgs.put(flag, String.join(" ", value));
                 }
 
-                flag = matcher.group(1).toLowerCase();
+                // Locale.ROOT - flag names are identifiers. Under a Turkish locale the default
+                // would fold "--Interval" to "\u0131nterval" and the flag would never be found.
+                flag = matcher.group(1).toLowerCase(Locale.ROOT);
                 value = new ArrayList<>();
             } else {
                 // part of a value

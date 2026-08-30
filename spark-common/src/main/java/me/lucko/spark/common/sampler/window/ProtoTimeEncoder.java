@@ -55,11 +55,42 @@ public class ProtoTimeEncoder {
         }
     }
 
+    /**
+     * Shares another encoder's key state verbatim - same array, same index map - so the two
+     * cannot drift apart and nothing is rebuilt per tree.
+     */
+    private ProtoTimeEncoder(LongToDoubleFunction valueTransformer, ProtoTimeEncoder other) {
+        this.valueTransformer = valueTransformer;
+        this.keys = other.keys;
+        this.keysToIndex = other.keysToIndex;
+    }
+
     public ProtoTimeEncoder(LongToDoubleFunction valueTransformer, List<ThreadNode> sourceData) {
         this(valueTransformer, sourceData.stream()
                 .map(n -> n.getTimeWindows().stream().mapToInt(i -> i))
                 .reduce(IntStream.empty(), IntStream::concat)
         );
+    }
+
+    /**
+     * Creates an encoder that writes exactly the same set of keys as {@code other}, but applies a
+     * different {@code valueTransformer}.
+     *
+     * <p>A profile has a single, profile-wide list of time windows, and an encoded {@code times}
+     * array is only interpretable when it is indexed against that list. When a profile carries
+     * more than one tree, every tree must therefore be encoded over the same key set - but the
+     * trees are not necessarily measured in the same unit (execution time is converted from
+     * microseconds, leaked memory is already in bytes), so they cannot share one encoder.</p>
+     *
+     * <p>The key state is shared by reference rather than copied, so "the same set of keys" is a
+     * property of the objects rather than something that has to stay true.</p>
+     *
+     * @param valueTransformer the transformer to apply to the new encoder's values
+     * @param other the encoder to take the key set from
+     * @return the new encoder
+     */
+    public static ProtoTimeEncoder withSameKeys(LongToDoubleFunction valueTransformer, ProtoTimeEncoder other) {
+        return new ProtoTimeEncoder(valueTransformer, other);
     }
 
     /**

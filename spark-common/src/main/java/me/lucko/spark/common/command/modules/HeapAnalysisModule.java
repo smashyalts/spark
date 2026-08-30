@@ -40,6 +40,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Iterator;
+import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
@@ -171,7 +172,7 @@ public class HeapAnalysisModule implements CommandModule {
         Iterator<String> compressArgs = arguments.stringFlag("compress").iterator();
         if (compressArgs.hasNext()) {
             try {
-                compressionMethod = Compression.valueOf(compressArgs.next().toUpperCase());
+                compressionMethod = Compression.valueOf(compressArgs.next().toUpperCase(Locale.ROOT));
             } catch (IllegalArgumentException e) {
                 // ignore
             }

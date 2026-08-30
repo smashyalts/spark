@@ -33,7 +33,9 @@ public abstract class MinecraftServerCommandSender extends MinecraftCommandSende
     @Override
     public String getName() {
         String name = this.delegate.getTextName();
-        if (this.delegate.getEntity() != null && name.equals("Server")) {
+        // the console is the source with no entity behind it - an entity that happens to be
+        // called "Server" is a player or a command block, not the console
+        if (this.delegate.getEntity() == null && name.equals("Server")) {
             return "Console";
         }
         return name;

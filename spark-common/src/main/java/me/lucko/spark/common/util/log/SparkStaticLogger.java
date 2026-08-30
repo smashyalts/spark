@@ -32,10 +32,20 @@ import java.util.logging.Level;
 public enum SparkStaticLogger {
     ;
 
-    private static Logger logger = Logger.FALLBACK;
+    private static volatile Logger logger = Logger.FALLBACK;
 
+    /**
+     * Installs the platform logger, if one has not been installed already.
+     *
+     * <p>The check is against {@link Logger#FALLBACK} rather than {@code null}: the field starts
+     * out holding the fallback, so a null check never passes and the platform logger is never
+     * installed - leaving every static log line going to {@link System#out}/{@link System#err},
+     * which is exactly what this class exists to avoid.</p>
+     *
+     * @param logger the logger to install
+     */
     public synchronized static void setLogger(Logger logger) {
-        if (SparkStaticLogger.logger == null) {
+        if (logger != null && SparkStaticLogger.logger == Logger.FALLBACK) {
             SparkStaticLogger.logger = logger;
         }
     }

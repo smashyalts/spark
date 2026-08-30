@@ -147,19 +147,22 @@ public enum CpuMonitor {
 
         @Override
         public void run() {
-            BigDecimal systemCpuLoad = new BigDecimal(systemLoad());
-            BigDecimal processCpuLoad = new BigDecimal(processLoad());
+            record(this.systemAverages, systemLoad());
+            record(this.processAverages, processLoad());
+        }
 
-            if (systemCpuLoad.signum() != -1) { // if value is not negative
-                for (RollingAverage average : this.systemAverages) {
-                    average.add(systemCpuLoad);
-                }
+        private static void record(RollingAverage[] averages, double value) {
+            // The bean returns a negative sentinel when the reading is unavailable, and has been
+            // observed returning NaN in some environments. new BigDecimal(double) throws for a
+            // non-finite value, and an exception escaping here would cancel the scheduled task
+            // for good - freezing every CPU statistic for the lifetime of the JVM.
+            if (!Double.isFinite(value) || value < 0) {
+                return;
             }
 
-            if (processCpuLoad.signum() != -1) { // if value is not negative
-                for (RollingAverage average : this.processAverages) {
-                    average.add(processCpuLoad);
-                }
+            BigDecimal decimal = new BigDecimal(value);
+            for (RollingAverage average : averages) {
+                average.add(decimal);
             }
         }
     }

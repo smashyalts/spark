@@ -26,7 +26,10 @@ import me.lucko.spark.common.sampler.AbstractSampler;
 import me.lucko.spark.common.sampler.SamplerMode;
 import me.lucko.spark.common.sampler.SamplerSettings;
 import me.lucko.spark.common.sampler.SamplerType;
+import me.lucko.spark.common.sampler.ThreadGrouper; // fork
+import me.lucko.spark.common.sampler.node.ThreadNode; // fork
 import me.lucko.spark.common.sampler.window.ProfilingWindowUtils;
+import me.lucko.spark.common.sampler.window.ProtoTimeEncoder; // fork
 import me.lucko.spark.common.tick.TickHook;
 import me.lucko.spark.common.util.SparkScheduledThreadPoolExecutor;
 import me.lucko.spark.common.util.SparkThreadFactory;
@@ -35,7 +38,11 @@ import me.lucko.spark.proto.SparkSamplerProtos;
 import me.lucko.spark.proto.SparkSamplerProtos.SamplerData;
 
 import com.google.common.collect.ImmutableList; // fork
+
+import java.util.ArrayList; // fork
+import java.util.Comparator; // fork
 import java.util.LinkedHashMap; // fork
+import java.util.List; // fork
 import java.util.Locale;
 import java.util.Map; // fork
 import java.util.concurrent.ScheduledExecutorService;
@@ -69,7 +76,7 @@ public class AsyncSampler extends AbstractSampler {
     private final Map<SampleCollector<?>, AsyncDataAggregator> extraAggregators = new LinkedHashMap<>();
 
     /** fork - thread grouper, retained so extra aggregators are grouped identically */
-    private final me.lucko.spark.common.sampler.ThreadGrouper threadGrouper;
+    private final ThreadGrouper threadGrouper;
 
     /** Whether to force the sampler to use monotonic/nano time */
     private final boolean forceNanoTime;
@@ -184,7 +191,11 @@ public class AsyncSampler extends AbstractSampler {
                 // start a new job
                 int window = previousJob.getWindow() + 1;
                 AsyncProfilerJob newJob = this.profilerAccess.startNewProfilerJob();
-                newJob.init(this.platform, this.sampleCollector, this.threadDumper, window, this.background, this.forceNanoTime);
+                // fork - the replacement job must be given the same extra collectors as the
+                // original, otherwise its recording carries none of the extra engines while
+                // aggregate() below still routes into their aggregators - producing empty leak
+                // trees that are indistinguishable from "profiled and found nothing".
+                newJob.init(this.platform, this.sampleCollector, ImmutableList.copyOf(this.extraAggregators.keySet()), this.threadDumper, window, this.background, this.forceNanoTime);
                 newJob.start();
                 this.windowStatisticsCollector.recordWindowStartTime(window);
                 this.currentJob = newJob;
@@ -202,6 +213,9 @@ public class AsyncSampler extends AbstractSampler {
                 // prune data older than the history size
                 IntPredicate predicate = ProfilingWindowUtils.keepHistoryBefore(window);
                 this.dataAggregator.pruneData(predicate);
+                for (AsyncDataAggregator extra : this.extraAggregators.values()) { // fork
+                    extra.pruneData(predicate);
+                }
                 this.windowStatisticsCollector.pruneStatistics(predicate);
 
                 this.scheduler.execute(this::processWindowRotate);
@@ -262,14 +276,19 @@ public class AsyncSampler extends AbstractSampler {
         super.stop(cancelled);
 
         synchronized (this.currentJobMutex) {
-            this.currentJob.stop();
-            if (!cancelled) {
-                this.windowStatisticsCollector.measureNow(this.currentJob.getWindow());
-                this.currentJob.aggregate(this.dataAggregator, this.extraAggregators); // fork
-            } else {
-                this.currentJob.deleteOutputFile();
+            // null when the sampler has already been stopped. Reachable as a race between the
+            // timeout task and an explicit '/spark profiler stop', where the loser would
+            // otherwise fail the sampler's future with a NullPointerException.
+            if (this.currentJob != null) {
+                this.currentJob.stop();
+                if (!cancelled) {
+                    this.windowStatisticsCollector.measureNow(this.currentJob.getWindow());
+                    this.currentJob.aggregate(this.dataAggregator, this.extraAggregators); // fork
+                } else {
+                    this.currentJob.deleteOutputFile();
+                }
+                this.currentJob = null;
             }
-            this.currentJob = null;
         }
 
         if (this.socketStatisticsTask != null) {
@@ -281,6 +300,9 @@ public class AsyncSampler extends AbstractSampler {
             this.scheduler = null;
         }
         this.dataAggregator.close();
+        for (AsyncDataAggregator extra : this.extraAggregators.values()) { // fork
+            extra.close();
+        }
     }
 
     @Override
@@ -314,8 +336,20 @@ public class AsyncSampler extends AbstractSampler {
             proto.setChannelInfo(exportProps.channelInfo());
         }
         writeMetadataToProto(proto, platform, exportProps.creator(), exportProps.comment(), this.dataAggregator);
-        writeDataToProto(proto, this.dataAggregator, AsyncNodeExporter::new, exportProps.classSourceLookup().get(), platform::createClassFinder);
-        writeExtendedDataToProto(proto); // fork
+
+        // fork - the extra trees are exported up-front so their time windows can be folded into
+        // the profile-wide window list, which every tree's times array is indexed against.
+        Map<SampleCollector<?>, List<ThreadNode>> extraTrees = new LinkedHashMap<>();
+        List<ThreadNode> allExtraNodes = new ArrayList<>();
+        for (Map.Entry<SampleCollector<?>, AsyncDataAggregator> entry : this.extraAggregators.entrySet()) {
+            List<ThreadNode> data = entry.getValue().exportData();
+            data.sort(Comparator.comparing(ThreadNode::getThreadLabel));
+            extraTrees.put(entry.getKey(), data);
+            allExtraNodes.addAll(data);
+        }
+
+        ProtoTimeEncoder timeEncoder = writeDataToProto(proto, this.dataAggregator, AsyncNodeExporter::new, exportProps.classSourceLookup().get(), platform::createClassFinder, allExtraNodes);
+        writeExtendedDataToProto(proto, timeEncoder, extraTrees); // fork
         return proto.build();
     }
 
@@ -327,24 +361,33 @@ public class AsyncSampler extends AbstractSampler {
      * and reporting a clean bill of health for a profile that never looked would be worse than
      * reporting nothing at all.</p>
      */
-    private void writeExtendedDataToProto(SamplerData.Builder proto) {
+    private void writeExtendedDataToProto(SamplerData.Builder proto, ProtoTimeEncoder timeEncoder, Map<SampleCollector<?>, List<ThreadNode>> extraTrees) {
+        // Derived from the primary collector rather than hardcoded. '--alloc --native-mem' is an
+        // accepted combination and builds a primary Allocation collector, so the primary tree then
+        // holds bytes allocated rather than execution time - and a reader that trusted a hardcoded
+        // has_execution would render those bytes as CPU milliseconds.
         SparkSamplerProtos.ExtendedProfileContents.Builder contents = SparkSamplerProtos.ExtendedProfileContents.newBuilder()
-                .setHasExecution(true)
+                .setHasExecution(this.sampleCollector instanceof SampleCollector.Execution)
                 .setLeakTailRatio(AsyncProfilerJob.LEAK_TAIL_RATIO)
                 .setForkVersion(FORK_VERSION);
 
-        long duration = this.startTime == -1 ? 0 : System.currentTimeMillis() - this.startTime;
+        // Measured to when the sampler actually stopped, not to when the profile happens to be
+        // exported: a leak total is read as a rate, and a profile exported minutes after the fact
+        // (or exported repeatedly, as the live viewer does) would otherwise claim a longer
+        // recording than it ran for and understate the leak.
+        long endTime = this.endTime == -1 ? System.currentTimeMillis() : this.endTime;
+        long duration = this.startTime == -1 ? 0 : endTime - this.startTime;
         contents.setDurationMillis(duration);
 
-        for (Map.Entry<SampleCollector<?>, AsyncDataAggregator> entry : this.extraAggregators.entrySet()) {
+        for (Map.Entry<SampleCollector<?>, List<ThreadNode>> entry : extraTrees.entrySet()) {
             SampleCollector<?> collector = entry.getKey();
 
             if (collector instanceof SampleCollector.NativeMemory) {
-                long total = writeExtraDataToProto(entry.getValue(), AsyncNodeExporter::new, proto::addNativeMemoryThreads);
+                long total = writeExtraDataToProto(entry.getValue(), timeEncoder, AsyncNodeExporter::new, proto::addNativeMemoryThreads);
                 contents.setHasNativeMemory(true);
                 contents.setNativeMemoryLeakedBytes(total);
             } else if (isHeapLeakCollector(collector)) {
-                long total = writeExtraDataToProto(entry.getValue(), AsyncNodeExporter::new, proto::addHeapLeakThreads);
+                long total = writeExtraDataToProto(entry.getValue(), timeEncoder, AsyncNodeExporter::new, proto::addHeapLeakThreads);
                 contents.setHasHeapLeak(true);
                 contents.setHeapLeakedBytes(total);
             }

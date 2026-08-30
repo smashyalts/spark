@@ -42,13 +42,19 @@ public enum CpuInfo {
     public static String queryCpuModel() {
         for (String line : LinuxProc.CPUINFO.read()) {
             String[] splitLine = SPACE_COLON_SPACE_PATTERN.split(line);
-            if (splitLine[0].equals("model name") || splitLine[0].equals("Processor")) {
-                return splitLine[1];
+            // a key with no value splits to a single element - reading [1] would throw, and the
+            // exception propagates far enough to drop every system statistic from the profile
+            if (splitLine.length > 1 && (splitLine[0].equals("model name") || splitLine[0].equals("Processor"))) {
+                return splitLine[1].trim();
             }
         }
 
         for (String line : WindowsWmi.PROCESSOR_NAME.read()) {
-            return line;
+            // WMI pads the processor name out to a fixed width
+            String trimmed = line.trim();
+            if (!trimmed.isEmpty()) {
+                return trimmed;
+            }
         }
 
         for (String line : MacosSysctl.SYSCTL.read()) {

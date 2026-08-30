@@ -26,9 +26,15 @@ public class NeoForgeClassSourceLookup implements ClassSourceLookup {
 
     @Override
     public String identify(Class<?> clazz) {
-        if (clazz.getClassLoader().getClass().getName().equals("cpw.mods.modlauncher.TransformingClassLoader")) {
+        // getClassLoader() is null for bootstrap-loaded classes (java.lang.String and friends),
+        // which show up in any stack trace; getName() is null for an unnamed module
+        ClassLoader loader = clazz.getClassLoader();
+        if (loader != null && loader.getClass().getName().equals("cpw.mods.modlauncher.TransformingClassLoader")) {
             String name = clazz.getModule().getName();
-            return name.equals("forge") || name.equals("minecraft") ? null : name;
+            if (name == null || name.equals("forge") || name.equals("minecraft")) {
+                return null;
+            }
+            return name;
         }
         return null;
     }

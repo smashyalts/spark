@@ -29,8 +29,8 @@ import javax.management.NotificationListener;
 import javax.management.openmbean.CompositeData;
 import java.lang.management.GarbageCollectorMXBean;
 import java.lang.management.ManagementFactory;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Monitoring process for garbage collections.
@@ -38,9 +38,13 @@ import java.util.List;
 public class GarbageCollectionMonitor implements NotificationListener, AutoCloseable {
 
     /** The registered listeners */
-    private final List<Listener> listeners = new ArrayList<>();
+    // iterated from the JMX notification thread while add/remove/close run on command threads -
+    // a plain ArrayList throws ConcurrentModificationException mid-notification
+    private final List<Listener> listeners = new CopyOnWriteArrayList<>();
     /** A list of the NotificationEmitters that feed information to this monitor. */
-    private final List<NotificationEmitter> emitters = new ArrayList<>();
+    // close() is reachable from a command thread and from the plugin-disable thread at the same
+    // time, and it iterates this list and then clears it
+    private final List<NotificationEmitter> emitters = new CopyOnWriteArrayList<>();
 
     public GarbageCollectionMonitor() {
         // Add ourselves as a notification listener for all GarbageCollectorMXBean that

@@ -232,16 +232,22 @@ public final class NetworkInterfaceInfo {
         int fieldRxPackets = rxFields.indexOf("packets");
         int fieldRxErrors = rxFields.indexOf("errs");
 
-        int fieldTxBytes = rxFieldsLength + txFields.indexOf("bytes");
-        int fieldTxPackets = rxFieldsLength + txFields.indexOf("packets");
-        int fieldTxErrors = rxFieldsLength + txFields.indexOf("errs");
+        // checked before the rx offset is applied: 'rxFieldsLength + -1' is not -1, so a missing
+        // transmit column would slip past the check below and then be read from the wrong index
+        int txBytes = txFields.indexOf("bytes");
+        int txPackets = txFields.indexOf("packets");
+        int txErrors = txFields.indexOf("errs");
 
-        int expectedFields = rxFieldsLength + txFieldsLength;
-
-        if (IntStream.of(fieldRxBytes, fieldRxPackets, fieldRxErrors, fieldTxBytes, fieldTxPackets, fieldTxErrors).anyMatch(i -> i == -1)) {
+        if (IntStream.of(fieldRxBytes, fieldRxPackets, fieldRxErrors, txBytes, txPackets, txErrors).anyMatch(i -> i == -1)) {
             // missing required fields
             return Collections.emptyMap();
         }
+
+        int fieldTxBytes = rxFieldsLength + txBytes;
+        int fieldTxPackets = rxFieldsLength + txPackets;
+        int fieldTxErrors = rxFieldsLength + txErrors;
+
+        int expectedFields = rxFieldsLength + txFieldsLength;
 
         ImmutableMap.Builder<String, NetworkInterfaceInfo> builder = ImmutableMap.builder();
 

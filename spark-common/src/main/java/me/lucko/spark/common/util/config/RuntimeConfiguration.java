@@ -23,6 +23,7 @@ package me.lucko.spark.common.util.config;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 
 public enum RuntimeConfiguration implements Configuration {
     SYSTEM_PROPERTIES {
@@ -35,7 +36,7 @@ public enum RuntimeConfiguration implements Configuration {
     ENVIRONMENT_VARIABLES {
         @Override
         public String getString(String path, String def) {
-            String name = "SPARK_" + path.replace(".", "_").replace("-", "_").toUpperCase();
+            String name = "SPARK_" + path.replace(".", "_").replace("-", "_").toUpperCase(Locale.ROOT);
             String value = System.getenv(name);
             return value != null ? value : def;
         }

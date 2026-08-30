@@ -175,12 +175,26 @@ public interface SampleCollector<E extends Event> {
 
         @Override
         public Collection<String> initArguments(AsyncProfilerAccess access) {
+            // Looked up purely as a capability assertion - allocation profiling is unavailable
+            // without Hotspot debug symbols, and failing here is far better than starting a
+            // recording that quietly contains no LiveObject stream.
             ProfilingEvent event = access.getAllocationProfilingEvent();
             Objects.requireNonNull(event, "event");
 
+            // Deliberately NOT emitting 'event=' here, even though the allocation event is what
+            // is being requested. HeapLeak only ever runs as an ADDITIONAL collector alongside a
+            // primary one, and async-profiler's 'event=' is single-valued: a second one replaces
+            // the first. Emitting 'event=alloc' next to the primary collector's 'event=wall'
+            // therefore turns a '--leaks' run into an allocation-only recording with no execution
+            // samples in it at all - while the profile still reports has_execution = true, so
+            // nothing about the result looks wrong.
+            //
+            // 'alloc=' is a separate additive engine and is by itself enough to switch allocation
+            // sampling on, which is exactly how the combination was verified against
+            // async-profiler 4.5: "event=wall,interval=10ms,alloc=512k,live,nativemem".
+            //
             // 'live' is what makes async-profiler emit the LiveObject stream at all.
             return ImmutableList.of(
-                    "event=" + event,
                     "alloc=" + this.intervalBytes,
                     "live"
             );

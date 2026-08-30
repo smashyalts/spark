@@ -30,7 +30,6 @@ import me.lucko.spark.common.sampler.java.TickedJavaDataAggregator;
 import me.lucko.spark.common.tick.TickHook;
 import me.lucko.spark.proto.SparkProtos;
 
-import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -49,7 +48,9 @@ public class WindowStatisticsCollector {
     private final SparkPlatform platform;
 
     /** Map of profiling window -> start time */
-    private final Map<Integer, Long> windowStartTimes = new HashMap<>();
+    // recorded when a window opens (the sampler's scheduler during rotation, the command thread
+    // at start) and read when it is measured (either of those) - so it genuinely crosses threads
+    private final Map<Integer, Long> windowStartTimes = new ConcurrentHashMap<>();
     /** Map of profiling window -> statistics */
     private final Map<Integer, SparkProtos.WindowStatistics> stats;
 

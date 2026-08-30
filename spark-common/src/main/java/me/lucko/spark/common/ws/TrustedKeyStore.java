@@ -26,12 +26,11 @@ import java.security.KeyPair;
 import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.util.Base64;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -45,14 +44,16 @@ public class TrustedKeyStore {
     /** Gets the local public/private key */
     private final CompletableFuture<KeyPair> localKeyPair;
     /** A set of remote public keys to trust */
+    // trusted from a command thread, consulted from the websocket listener thread
     private final Set<PublicKey> remoteTrustedKeys;
-    /** A mpa of pending remote public keys */
-    private final Map<String, PublicKey> remotePendingKeys = new HashMap<>();
+    /** A map of pending remote public keys */
+    // added from the websocket listener thread, removed from a command thread
+    private final Map<String, PublicKey> remotePendingKeys = new ConcurrentHashMap<>();
 
     public TrustedKeyStore(Configuration configuration) {
         this.configuration = configuration;
         this.localKeyPair = CompletableFuture.supplyAsync(ViewerSocketConnection.CRYPTO::generateKeyPair);
-        this.remoteTrustedKeys = new HashSet<>();
+        this.remoteTrustedKeys = ConcurrentHashMap.newKeySet();
         readTrustedKeys();
     }
 
@@ -133,7 +134,15 @@ public class TrustedKeyStore {
                 .map(key -> Base64.getEncoder().encodeToString(key.getEncoded()))
                 .collect(Collectors.toList());
 
+        // Re-read from disk first. The file configuration is loaded once when the plugin is
+        // enabled and never again, so saving it as-is would serialise a snapshot that is however
+        // many hours stale over the file - silently undoing any edit an admin made to it while
+        // the server was running.
+        this.configuration.load();
         this.configuration.setStringList(TRUSTED_KEYS_OPTION, encodedKeys);
+        // without this the updated list only ever exists in memory, so a key the user explicitly
+        // trusted has to be trusted again after every restart
+        this.configuration.save();
     }
 
 }

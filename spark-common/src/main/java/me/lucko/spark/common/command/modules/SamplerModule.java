@@ -296,7 +296,12 @@ public class SamplerModule implements CommandModule {
         });
 
         // set activeSampler to null when complete.
-        sampler.getFuture().whenCompleteAsync((s, throwable) -> platform.getSamplerContainer().unsetActiveSampler(s));
+        //
+        // the completed value is null when the future failed, and unsetActiveSampler(null) is a
+        // no-op - which left a dead sampler installed as the active one, so every subsequent
+        // 'profiler start' answered "Profiler is already running!" until an admin ran
+        // 'profiler cancel'. Unset the sampler we started, not whatever the future produced.
+        sampler.getFuture().whenCompleteAsync((s, throwable) -> platform.getSamplerContainer().unsetActiveSampler(sampler));
 
         // await the result
         if (timeoutSeconds != -1) {

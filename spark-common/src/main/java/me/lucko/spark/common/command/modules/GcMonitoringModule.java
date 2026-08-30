@@ -31,7 +31,6 @@ import me.lucko.spark.common.util.FormatUtil;
 import net.kyori.adventure.text.Component;
 
 import java.lang.management.MemoryUsage;
-import java.text.DecimalFormat;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -48,7 +47,6 @@ import static net.kyori.adventure.text.format.NamedTextColor.WHITE;
 import static net.kyori.adventure.text.format.TextDecoration.BOLD;
 
 public class GcMonitoringModule implements CommandModule {
-    private static final DecimalFormat DF = new DecimalFormat("#.##");
 
     /** The gc monitoring instance currently running, if any */
     private ReportingGcMonitor activeGcMonitor = null;
@@ -112,7 +110,7 @@ public class GcMonitoringModule implements CommandModule {
                         );
                         report.add(text()
                                 .content("      ")
-                                .append(text(DF.format(averageCollectionTime), GOLD))
+                                .append(text(FormatUtil.twoDecimalPlaces(averageCollectionTime), GOLD))
                                 .append(text(" ms avg", GRAY))
                                 .append(text(", ", DARK_GRAY))
                                 .append(text(collectionCount, WHITE))
@@ -177,7 +175,7 @@ public class GcMonitoringModule implements CommandModule {
                                 .append(text(gcType + " "))
                                 .append(text("GC", RED))
                                 .append(text(" lasting "))
-                                .append(text(DF.format(data.getGcInfo().getDuration()), GOLD))
+                                .append(text(FormatUtil.twoDecimalPlaces(data.getGcInfo().getDuration()), GOLD))
                                 .append(text(" ms." + gcCause))
                                 .build()
                 ));

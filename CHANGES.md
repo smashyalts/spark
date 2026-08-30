@@ -183,6 +183,152 @@ memory leak trees.
 
 ---
 
+## Bug fixes
+
+Date of changes: 2026-08-30
+
+A full line-by-line audit of the tree. Fixes to code this fork introduced are listed first;
+fixes to inherited upstream code follow.
+
+### In this fork's own code
+
+#### `SampleCollector.HeapLeak` emitted a second `event=`, so `--heap-leaks` could not start
+`HeapLeak` only ever runs as an *additional* collector, but it emitted `event=<alloc>`
+alongside the primary collector's `event=wall`, producing a start command containing two
+`event=` arguments:
+
+```
+start,event=wall,interval=4000us,event=alloc,alloc=524287,live,nativemem=0,threads,jfr,file=...
+```
+
+async-profiler's `event=` is single-valued and it rejects a duplicate outright — all three
+bundled 4.5 binaries carry the error string `Duplicate event argument`, sitting directly
+alongside its other argument-parsing errors (`event must not be empty`, `Invalid interval`).
+`AsyncProfilerJob#start` treats any response other than `profiling started` as fatal, so
+`--heap-leaks` — and therefore `--leaks`, which turns it on — failed at the point of starting
+the profiler.
+
+`alloc=` is a separate additive engine and is by itself sufficient to switch allocation
+sampling on, which is exactly the combination this fork documents as verified:
+`event=wall,interval=10ms,alloc=512k,live,nativemem`. The `event=` is now dropped.
+
+`AsyncProfilerJob` additionally refuses to start if *any* additional collector contributes an
+`event=` argument, so this cannot be reintroduced. (`ExtraCollectorArgumentsTest`.)
+
+Note this was established by reading the code and the bundled binaries: async-profiler is
+Linux/macOS only, so the failure could not be reproduced on the Windows host this audit ran
+on. It does not square with the note under "New files" claiming `--leaks` was verified
+end-to-end on Geyser Standalone; that claim should be re-checked against a real run.
+
+#### Native memory tracking retained every settled address
+The eviction of a settled malloc/free pair was gated on the entry carrying no allocation
+details, which is only ever true for a free seen *before* its malloc. The ordinary case —
+malloc, then free — was therefore never evicted, so the tracking map grew with **total
+allocation history** rather than with outstanding memory: the precise unbounded growth the
+2,000,000 address cap and the whole net-counting design exist to avoid. An entry is now
+dropped as soon as its balance returns to zero. (`NativeMemoryLeakTrackingTest`.)
+
+#### Window rotation dropped the extra collectors
+`AsyncSampler#rotateProfilerJob` re-initialised the replacement job through the overload that
+takes no extra collectors, so a rotated recording carried none of the extra engines while
+aggregation still routed into their aggregators — empty leak trees, indistinguishable from
+"profiled and found nothing". Reachable as soon as any extra collector that does not disable
+rotation is added. The extra aggregators are now also pruned alongside the primary one.
+
+#### Extra trees were encoded against their own time windows
+Each extra tree built its own `ProtoTimeEncoder`, so its `times` array was indexed against a
+different key set than the profile-wide `time_windows` list every reader interprets it
+against. All trees now share one key set, computed over the union of every tree written into
+the profile.
+
+#### `duration_millis` was measured to export time
+It was computed as `now - startTime` at export, so a profile exported after the fact — or
+exported repeatedly, as the live viewer does — claimed a longer recording than it ran for and
+understated the leak rate. `AbstractSampler` now records an end time and it is used instead.
+
+#### Extra aggregators were never closed.
+
+### In inherited upstream code
+
+- **`SparkStaticLogger` never installed the platform logger.** The field is initialised to
+  `Logger.FALLBACK`, so the `== null` guard in `setLogger` could never pass — every static log
+  line went to `System.out`/`System.err`, which is exactly what the class exists to avoid.
+- **`PlatformStatisticsProvider` threw on a null `collectionUsage`.** `getCollectionUsage()`
+  returns null for pools that don't track it; the NPE is swallowed by `SparkMetadata#gather`,
+  which drops *every* platform statistic from the profile. (`HealthModule` already guarded the
+  same value.)
+- **`CpuMonitor`'s polling task could die permanently.** `new BigDecimal(double)` throws for a
+  non-finite reading, and an exception escaping a `scheduleAtFixedRate` task cancels it for
+  good — freezing every CPU statistic for the lifetime of the JVM.
+- **`ThreadDumper.Regex` cached into a plain `HashMap`** from both the sampler and aggregation
+  threads.
+- **`AbstractNode#getTimeAccumulator` used get-then-put**, so two threads racing on a new
+  window each created an accumulator and the loser's samples were discarded. (`resolveChild`,
+  immediately above it, already used `computeIfAbsent`.)
+- **`NetworkInterfaceInfo` never detected a missing transmit column.** The check ran after the
+  receive-field offset had been added, and `rxFieldsLength + -1` is not `-1`, so a missing
+  column passed validation and was then read from the wrong index.
+- **Trusted viewer keys were never persisted.** `TrustedKeyStore` updated the configuration but
+  never saved it, so a key the user explicitly trusted had to be trusted again after a restart.
+- **`BytebinClient` replaced upload failures with a bare `IOException`.** `getInputStream()` in
+  the `finally` block throws when the server answered with an error status, losing the real
+  reason for the failure.
+- **Locale-sensitive case conversion** on command aliases, flag names, `--compress` values and
+  environment variable names — all identifiers, all of which stop matching under a Turkish
+  locale. Now `Locale.ROOT`.
+- **`DecimalFormat` shared across threads** in `TickMonitor` and `GcMonitoringModule`, both of
+  which format from an arbitrary async executor thread.
+- **`MinecraftServerCommandSender#getName` had its console check inverted** (`getEntity() != null`
+  where the console is the source with *no* entity).
+- **`NeoForgeClassSourceLookup` dereferenced a null classloader**, which every bootstrap-loaded
+  class in a stack trace has.
+- **`CpuMonitorTest` asserted against the operating system.** Both readings are documented to
+  return a negative value when unavailable — briefly in a fresh JVM, and permanently on hosts
+  whose performance counters are unavailable (verified on Windows, where the underlying
+  `ProcessCpuLoad`/`SystemCpuLoad` attributes read `-1.0` indefinitely). The test now waits out
+  the first case and skips the second.
+
+- **The active sampler was never cleared when a profile failed.** `SamplerModule` unset the
+  sampler the *future* produced, which is null on failure - so a dead sampler stayed installed
+  and every later `profiler start` answered "Profiler is already running!" until an admin ran
+  `profiler cancel`.
+- **`GarbageCollectionMonitor` iterated a plain `ArrayList` of listeners** from the JMX
+  notification thread while commands added, removed and cleared it.
+- **`WindowStatisticsCollector` and `TrustedKeyStore` held plain `HashMap`/`HashSet` state that
+  genuinely crosses threads** - window start times are recorded on the sampler's scheduler and
+  read on the command thread; pending viewer keys are added on the websocket listener thread and
+  removed on a command thread.
+- **`ThreadDumper.Specific` published two lazily-computed sets without `volatile`**, and
+  aggregation runs on the scheduler during rotation but on the command thread at stop.
+- **`WorldStatisticsProvider` passed a possibly-null game rule default into protobuf**, which
+  rejects null strings - taking the whole world statistics section down rather than one field.
+- **`CpuInfo` indexed `[1]` of a `/proc/cpuinfo` split without checking the length**, and
+  returned the WMI processor name with its fixed-width padding still attached.
+- **`OperatingSystemInfo` accepted a blank WMI line as the OS name**, which is not null and so
+  suppressed the `os.name` fallback.
+- **`BukkitPlatformInfo` read index 3 of the server package name**, which modern Paper does not
+  have; the resulting exception is thrown outside the metadata gather's try blocks and fails the
+  entire export.
+- **The Geyser extension left its handlers unguarded** against a failed pre-initialise, and
+  nulled its fields on shutdown so a late callback met a `NullPointerException`.
+- **The JFR temp file was only deleted on the success path.** A leak recording is written with
+  `nativemem=0` and routinely runs to gigabytes, so a parse failure left one behind on the disk
+  of the server being diagnosed.
+
+The Fabric/Forge/NeoForge/Sponge/BungeeCord/Minecraft modules are excluded from the build, so
+the fixes in those trees are source-level only and are not compile-verified here.
+
+### Method
+
+Four passes over the tree. The first read every file end to end; the second and third re-read it
+and were paired with mechanical cross-checks (locale-sensitive case conversion, non-concurrent
+collections on fields that cross threads, unguarded array indexing after `split`, unguarded
+numeric parsing, mutable static state). The linear reads found the logic errors; the
+cross-checks found most of the concurrency ones. The fourth pass produced nothing new by either
+method.
+
+---
+
 ## Not changed
 
 Everything user-facing. This fork identifies itself as spark because it *is* spark,

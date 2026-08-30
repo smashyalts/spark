@@ -166,12 +166,18 @@ public class PlatformStatisticsProvider {
                 usage = new MemoryUsage(usage.getInit(), usage.getUsed(), usage.getCommitted(), usage.getCommitted());
             }
 
-            memory.addPools(PlatformStatistics.Memory.MemoryPool.newBuilder()
+            PlatformStatistics.Memory.MemoryPool.Builder pool = PlatformStatistics.Memory.MemoryPool.newBuilder()
                     .setName(memoryPool.getName())
-                    .setUsage(memoryUsageProto(usage))
-                    .setCollectionUsage(memoryUsageProto(collectionUsage))
-                    .build()
-            );
+                    .setUsage(memoryUsageProto(usage));
+
+            // getCollectionUsage() returns null for pools that don't track it. Reading through it
+            // unconditionally throws, and the resulting NPE is caught upstream in
+            // SparkMetadata#gather - which drops every platform statistic from the profile.
+            if (collectionUsage != null) {
+                pool.setCollectionUsage(memoryUsageProto(collectionUsage));
+            }
+
+            memory.addPools(pool.build());
         }
 
         builder.setMemory(memory.build());

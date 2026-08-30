@@ -23,12 +23,30 @@ package me.lucko.spark.common.util;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.TextColor;
 
+import java.text.DecimalFormat;
 import java.util.Locale;
 
 public enum FormatUtil {
     ;
 
     private static final String[] SIZE_UNITS = {"bytes", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"};
+
+    private static final DecimalFormat TWO_DECIMAL_PLACES = new DecimalFormat("#.##");
+
+    /**
+     * Formats a value to at most two decimal places.
+     *
+     * <p>{@link DecimalFormat} is not thread safe, and the tick and gc reports that use this are
+     * formatted from arbitrary async executor threads.</p>
+     *
+     * @param value the value to format
+     * @return the formatted value
+     */
+    public static String twoDecimalPlaces(double value) {
+        synchronized (TWO_DECIMAL_PLACES) {
+            return TWO_DECIMAL_PLACES.format(value);
+        }
+    }
 
     public static String percent(double value, double max) {
         double percent = (value * 100d) / max;

@@ -26,10 +26,11 @@ import me.lucko.spark.proto.SparkSamplerProtos.SamplerMetadata;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
 import java.util.Arrays;
-import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -138,17 +139,20 @@ public interface ThreadDumper {
      */
     final class Specific implements ThreadDumper {
         private final long[] ids;
-        private Set<Thread> threads;
-        private Set<String> threadNamesLowerCase;
+        // lazily computed, and read from more than one thread: aggregation runs on the sampler's
+        // scheduler during window rotation but on the command thread when the profiler is stopped.
+        // volatile so a reader cannot observe a half-published set.
+        private volatile Set<Thread> threads;
+        private volatile Set<String> threadNamesLowerCase;
 
         public Specific(Thread thread) {
             this.ids = new long[]{thread.getId()};
         }
 
         public Specific(Set<String> names) {
-            this.threadNamesLowerCase = names.stream().map(String::toLowerCase).collect(Collectors.toSet());
+            this.threadNamesLowerCase = names.stream().map(Specific::lowerCase).collect(Collectors.toSet());
             this.ids = new ThreadFinder().getThreads()
-                    .filter(t -> this.threadNamesLowerCase.contains(t.getName().toLowerCase()))
+                    .filter(t -> this.threadNamesLowerCase.contains(lowerCase(t.getName())))
                     .mapToLong(Thread::getId)
                     .toArray();
             Arrays.sort(this.ids);
@@ -166,7 +170,7 @@ public interface ThreadDumper {
         public Set<String> getThreadNames() {
             if (this.threadNamesLowerCase == null) {
                 this.threadNamesLowerCase = getThreads().stream()
-                        .map(t -> t.getName().toLowerCase())
+                        .map(t -> lowerCase(t.getName()))
                         .collect(Collectors.toSet());
             }
             return this.threadNamesLowerCase;
@@ -177,7 +181,14 @@ public interface ThreadDumper {
             if (Arrays.binarySearch(this.ids, threadId) >= 0) {
                 return true;
             }
-            return getThreadNames().contains(threadName.toLowerCase());
+            return getThreadNames().contains(lowerCase(threadName));
+        }
+
+        // Locale.ROOT: thread names are identifiers, not prose. The default locale would fold
+        // 'I' to a dotless 'i' under a Turkish locale and stop matching the thread the user asked
+        // for.
+        private static String lowerCase(String s) {
+            return s.toLowerCase(Locale.ROOT);
         }
 
         @Override
@@ -200,7 +211,9 @@ public interface ThreadDumper {
     final class Regex implements ThreadDumper {
         private final ThreadFinder threadFinder = new ThreadFinder();
         private final Set<Pattern> namePatterns;
-        private final Map<Long, Boolean> cache = new HashMap<>();
+        // read and written from both the sampler thread and the aggregation thread - a plain
+        // HashMap can corrupt its table or spin forever under concurrent writes
+        private final Map<Long, Boolean> cache = new ConcurrentHashMap<>();
 
         public Regex(Set<String> namePatterns) {
             this.namePatterns = namePatterns.stream()

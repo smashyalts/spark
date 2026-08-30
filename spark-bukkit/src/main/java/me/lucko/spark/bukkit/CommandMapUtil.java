@@ -34,6 +34,7 @@ import org.bukkit.plugin.SimplePluginManager;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.util.Iterator;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -93,10 +94,15 @@ enum CommandMapUtil {
                 PluginCommand cmd = COMMAND_CONSTRUCTOR.newInstance(alias, plugin);
 
                 commandMap.register(plugin.getDescription().getName(), cmd);
-                knownCommandMap.put(plugin.getDescription().getName().toLowerCase() + ":" + alias.toLowerCase(), cmd);
-                knownCommandMap.put(alias.toLowerCase(), cmd);
+                // Locale.ROOT, not the default locale: Bukkit's own SimpleCommandMap lowercases
+                // labels with a fixed locale, so using the default one here would produce keys the
+                // server never looks up (a plugin name or alias containing 'I' under a Turkish
+                // locale folds to a dotless 'i')
+                String label = alias.toLowerCase(Locale.ROOT);
+                knownCommandMap.put(plugin.getDescription().getName().toLowerCase(Locale.ROOT) + ":" + label, cmd);
+                knownCommandMap.put(label, cmd);
 
-                cmd.setLabel(alias.toLowerCase());
+                cmd.setLabel(label);
 
                 cmd.setExecutor(command);
 

@@ -20,6 +20,7 @@
 
 package me.lucko.spark.common.sampler.async;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableTable;
 import com.google.common.collect.Table;
 import com.google.common.io.ByteStreams;
@@ -97,6 +98,18 @@ public class AsyncProfilerAccess {
         this.profilingEvent = profilingEvent;
         this.allocationProfilingEvent = allocationProfilingEvent;
         this.setupException = setupException;
+    }
+
+    /**
+     * Constructs an instance that reports the given events without loading async-profiler, so the
+     * argument each {@link SampleCollector} contributes can be asserted on directly.
+     */
+    @VisibleForTesting
+    AsyncProfilerAccess(ProfilingEvent profilingEvent, ProfilingEvent allocationProfilingEvent) {
+        this.profiler = null;
+        this.profilingEvent = profilingEvent;
+        this.allocationProfilingEvent = allocationProfilingEvent;
+        this.setupException = null;
     }
 
     public AsyncProfilerJob startNewProfilerJob() {

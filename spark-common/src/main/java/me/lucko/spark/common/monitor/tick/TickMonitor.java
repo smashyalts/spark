@@ -24,9 +24,9 @@ import com.sun.management.GarbageCollectionNotificationInfo;
 import me.lucko.spark.common.SparkPlatform;
 import me.lucko.spark.common.monitor.memory.GarbageCollectionMonitor;
 import me.lucko.spark.common.tick.TickHook;
+import me.lucko.spark.common.util.FormatUtil;
 import net.kyori.adventure.text.Component;
 
-import java.text.DecimalFormat;
 import java.util.DoubleSummaryStatistics;
 
 import static net.kyori.adventure.text.Component.space;
@@ -41,7 +41,6 @@ import static net.kyori.adventure.text.format.NamedTextColor.WHITE;
  * Monitoring process for the server/client tick rate.
  */
 public abstract class TickMonitor implements TickHook.Callback, GarbageCollectionMonitor.Listener, AutoCloseable {
-    private static final DecimalFormat DF = new DecimalFormat("#.##");
 
     /** The spark platform */
     private final SparkPlatform platform;
@@ -141,7 +140,7 @@ public abstract class TickMonitor implements TickHook.Callback, GarbageCollectio
                             .append(text(">", WHITE))
                             .append(space())
                             .append(text("Max: "))
-                            .append(text(DF.format(this.averageTickTimeCalc.getMax())))
+                            .append(text(FormatUtil.twoDecimalPlaces(this.averageTickTimeCalc.getMax())))
                             .append(text("ms"))
                             .build()
                     );
@@ -150,7 +149,7 @@ public abstract class TickMonitor implements TickHook.Callback, GarbageCollectio
                             .append(text(">", WHITE))
                             .append(space())
                             .append(text("Min: "))
-                            .append(text(DF.format(this.averageTickTimeCalc.getMin())))
+                            .append(text(FormatUtil.twoDecimalPlaces(this.averageTickTimeCalc.getMin())))
                             .append(text("ms"))
                             .build()
                     );
@@ -159,7 +158,7 @@ public abstract class TickMonitor implements TickHook.Callback, GarbageCollectio
                             .append(text(">", WHITE))
                             .append(space())
                             .append(text("Average: "))
-                            .append(text(DF.format(this.averageTickTimeCalc.getAverage())))
+                            .append(text(FormatUtil.twoDecimalPlaces(this.averageTickTimeCalc.getAverage())))
                             .append(text("ms"))
                             .build()
                     );
@@ -181,10 +180,10 @@ public abstract class TickMonitor implements TickHook.Callback, GarbageCollectio
                             .append(text("Tick "))
                             .append(text("#" + getCurrentTick(), DARK_GRAY))
                             .append(text(" lasted "))
-                            .append(text(DF.format(tickDuration), GOLD))
+                            .append(text(FormatUtil.twoDecimalPlaces(tickDuration), GOLD))
                             .append(text(" ms. "))
                             .append(text("("))
-                            .append(text(DF.format(percentageChange) + "%", GOLD))
+                            .append(text(FormatUtil.twoDecimalPlaces(percentageChange) + "%", GOLD))
                             .append(text(" increase from avg)"))
                             .build()
                     );
@@ -209,7 +208,7 @@ public abstract class TickMonitor implements TickHook.Callback, GarbageCollectio
                     .append(text(" included "))
                     .append(text("GC", RED))
                     .append(text(" lasting "))
-                    .append(text(DF.format(data.getGcInfo().getDuration()), GOLD))
+                    .append(text(FormatUtil.twoDecimalPlaces(data.getGcInfo().getDuration()), GOLD))
                     .append(text(" ms. (type = " + GarbageCollectionMonitor.getGcType(data) + ")"))
                     .build()
             );

@@ -41,6 +41,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -235,7 +236,7 @@ public class CommandManager implements AutoCloseable {
         }
 
         ArrayList<String> rawArgs = new ArrayList<>(Arrays.asList(args));
-        String alias = rawArgs.remove(0).toLowerCase();
+        String alias = rawArgs.remove(0).toLowerCase(Locale.ROOT);
 
         for (Command command : commands) {
             if (command.aliases().contains(alias)) {
@@ -270,7 +271,7 @@ public class CommandManager implements AutoCloseable {
                     .complete(arguments);
         }
 
-        String alias = arguments.remove(0);
+        String alias = arguments.remove(0).toLowerCase(Locale.ROOT);
         for (Command command : commands) {
             if (command.aliases().contains(alias)) {
                 return command.tabCompleter().completions(this.platform, sender, arguments);

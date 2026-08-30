@@ -60,16 +60,23 @@ public final class OperatingSystemInfo {
         }
 
         for (String line : WindowsWmi.OPERATING_SYSTEM_CAPTION.read()) {
-            if (line.startsWith("Microsoft ")) {
-                name = line.substring(10).trim();
-            } else {
-                name = line.trim();
+            // skip blank lines rather than taking the first one unconditionally: an empty value
+            // here is not null, so it would suppress the os.name fallback below and leave the
+            // profile reporting no operating system at all
+            String caption = line.trim();
+            if (caption.isEmpty()) {
+                continue;
             }
+            name = caption.startsWith("Microsoft ") ? caption.substring(10).trim() : caption;
             break;
         }
 
         for (String line : WindowsWmi.OPERATING_SYSTEM_VERSION.read()) {
-            version = line.trim();
+            String trimmed = line.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            version = trimmed;
             break;
         }
 

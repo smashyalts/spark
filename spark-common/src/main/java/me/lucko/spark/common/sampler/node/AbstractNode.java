@@ -51,12 +51,14 @@ public abstract class AbstractNode {
      * @return the accumulator
      */
     protected LongAdder getTimeAccumulator(int window) {
-        LongAdder adder = this.times.get(window);
-        if (adder == null) {
-            adder = new LongAdder();
-            this.times.put(window, adder);
+        LongAdder adder = this.times.get(window); // fast path
+        if (adder != null) {
+            return adder;
         }
-        return adder;
+        // computeIfAbsent, not get-then-put: two threads racing on the same new window would
+        // otherwise each create an accumulator, and whichever lost the put would have every
+        // sample it recorded thrown away.
+        return this.times.computeIfAbsent(window, w -> new LongAdder());
     }
 
     /**

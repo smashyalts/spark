@@ -86,6 +86,12 @@ public class GeyserSparkPlugin implements Extension, SparkPlugin {
 
     @Subscribe
     public void onRegisterPermissions(GeyserRegisterPermissionsEvent event) {
+        // null if onPreInitialize failed. Returning quietly leaves spark unavailable; letting an
+        // NPE out of here would instead break permission registration for the whole server.
+        if (this.platform == null) {
+            return;
+        }
+
         // Geyser Standalone keeps its own permissions file, so spark's permission
         // nodes have to be declared to it or they can never be granted there.
         // Default to FALSE: profiling is an admin action, console is always allowed.
@@ -96,6 +102,10 @@ public class GeyserSparkPlugin implements Extension, SparkPlugin {
 
     @Subscribe
     public void onDefineCommands(GeyserDefineCommandsEvent event) {
+        if (this.platform == null) {
+            return;
+        }
+
         // Geyser namespaces extension commands under the extension's root command
         // (which defaults to the extension id, "spark"). Registering each of spark's
         // own top-level commands here gives the familiar "/spark profiler start ..."
@@ -128,7 +138,6 @@ public class GeyserSparkPlugin implements Extension, SparkPlugin {
     public void onShutdown(GeyserShutdownEvent event) {
         if (this.platform != null) {
             this.platform.disable();
-            this.platform = null;
         }
         if (this.asyncExecutor != null) {
             this.asyncExecutor.shutdown();
@@ -140,8 +149,9 @@ public class GeyserSparkPlugin implements Extension, SparkPlugin {
                 this.asyncExecutor.shutdownNow();
                 Thread.currentThread().interrupt();
             }
-            this.asyncExecutor = null;
         }
+        // the fields are deliberately not nulled out: a late callback arriving after shutdown
+        // should hit a rejected task or a disabled platform, not a NullPointerException
     }
 
     @Override

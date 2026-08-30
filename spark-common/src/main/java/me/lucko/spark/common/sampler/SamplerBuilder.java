@@ -175,11 +175,14 @@ public class SamplerBuilder {
             if (onlyTicksOverMode) {
                 throw new UnsupportedOperationException("Leak detection cannot be combined with --only-ticks-over, because leak correlation needs one continuous recording.");
             }
-            // Both the primary Allocation collector and the HeapLeak collector emit 'alloc=' and
-            // async-profiler takes last-wins, so combining them silently overrides the user's
-            // --interval. Refuse rather than profile at a rate they did not ask for.
+            // Both the primary Allocation collector and the HeapLeak collector configure
+            // allocation profiling, each with its own 'alloc=' interval. Rather than rely on how
+            // async-profiler resolves the duplicate, refuse the combination outright: profiling at
+            // a rate the user did not ask for would be worse than refusing.
             if (this.heapLeaks && this.mode == SamplerMode.ALLOCATION) {
-                throw new UnsupportedOperationException("--heap-leaks cannot be combined with --alloc: they both configure allocation profiling and would conflict. Use --heap-leaks on its own - it already reports retained objects.");
+                // named as 'heap leak detection' rather than '--heap-leaks': --leaks turns it on
+                // too, and pointing at a flag the user never typed is not a useful error
+                throw new UnsupportedOperationException("Heap leak detection cannot be combined with --alloc: they both configure allocation profiling and would conflict. Use --heap-leaks (or --leaks) on its own - it already reports retained objects.");
             }
             if (this.autoEndTime == -1) {
                 throw new UnsupportedOperationException("Leak detection requires a --timeout, because it records every native allocation and window rotation is disabled. An unbounded run can write gigabytes to disk. Try --timeout 900.");

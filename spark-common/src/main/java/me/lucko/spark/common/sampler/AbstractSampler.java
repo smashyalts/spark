@@ -36,12 +36,16 @@ import me.lucko.spark.proto.SparkProtos;
 import me.lucko.spark.proto.SparkSamplerProtos.SamplerData;
 import me.lucko.spark.proto.SparkSamplerProtos.SamplerMetadata;
 
+import com.google.common.collect.ImmutableList;
+
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.logging.Level;
@@ -61,7 +65,13 @@ public abstract class AbstractSampler implements Sampler {
     protected final ThreadDumper threadDumper;
 
     /** The time when sampling first began */
-    protected long startTime = -1;
+    // volatile: written on the thread that starts/stops the sampler, read when the profile is
+    // exported - which happens on the export future's thread, and repeatedly on a socket thread
+    // for a live viewer. A long is not even read atomically without it.
+    protected volatile long startTime = -1;
+
+    /** The time when sampling stopped, or -1 if it is still running */
+    protected volatile long endTime = -1;
 
     /** The unix timestamp (in millis) when this sampler should automatically complete. */
     protected final long autoEndTime; // -1 for nothing
@@ -133,6 +143,16 @@ public abstract class AbstractSampler implements Sampler {
 
     @Override
     public void stop(boolean cancelled) {
+        // stop() is reachable twice - the timeout task and an explicit '/spark profiler stop' race
+        // for it - and everything below has to happen exactly once. A second endTime would
+        // overwrite the real one with a later timestamp, inflating the recording's apparent
+        // duration and understating any rate computed from it; and the attached viewers would be
+        // told the sampler stopped twice.
+        if (this.endTime != -1) {
+            return;
+        }
+
+        this.endTime = System.currentTimeMillis();
         this.windowStatisticsCollector.stop();
         for (ViewerSocket viewerSocket : this.viewerSockets) {
             viewerSocket.processSamplerStopped(this);
@@ -206,13 +226,34 @@ public abstract class AbstractSampler implements Sampler {
         proto.setMetadata(metadata);
     }
 
-    protected void writeDataToProto(SamplerData.Builder proto, DataAggregator dataAggregator, Function<ProtoTimeEncoder, NodeExporter> nodeExporterFunction, ClassSourceLookup classSourceLookup, Supplier<ClassFinder> classFinderSupplier) {
+    protected ProtoTimeEncoder writeDataToProto(SamplerData.Builder proto, DataAggregator dataAggregator, Function<ProtoTimeEncoder, NodeExporter> nodeExporterFunction, ClassSourceLookup classSourceLookup, Supplier<ClassFinder> classFinderSupplier) {
+        return writeDataToProto(proto, dataAggregator, nodeExporterFunction, classSourceLookup, classFinderSupplier, Collections.emptyList());
+    }
+
+    /**
+     * Writes the primary data tree, the profile-wide time window list and the class source
+     * mappings.
+     *
+     * @param additionalTimeWindowSources trees that will be written into the same profile later,
+     *        and whose time windows must therefore be covered by the profile-wide window list
+     * @return the encoder used for the primary tree, so additional trees can be encoded over the
+     *         same key set
+     */
+    protected ProtoTimeEncoder writeDataToProto(SamplerData.Builder proto, DataAggregator dataAggregator, Function<ProtoTimeEncoder, NodeExporter> nodeExporterFunction, ClassSourceLookup classSourceLookup, Supplier<ClassFinder> classFinderSupplier, List<ThreadNode> additionalTimeWindowSources) {
         List<ThreadNode> data = dataAggregator.exportData();
         data.sort(Comparator.comparing(ThreadNode::getThreadLabel));
 
         ClassSourceLookup.Visitor classSourceVisitor = ClassSourceLookup.createVisitor(classSourceLookup, classFinderSupplier);
 
-        ProtoTimeEncoder timeEncoder = new ProtoTimeEncoder(getMode().valueTransformer(), data);
+        // fork - the encoder's key set has to span every tree written into this profile, not just
+        // the primary one. 'time_windows' is profile-wide, so a 'times' array is only meaningful
+        // when indexed against it; and an encoder built from the primary tree alone would throw
+        // outright for a window only an extra tree recorded.
+        List<ThreadNode> timeWindowSources = additionalTimeWindowSources.isEmpty()
+                ? data
+                : ImmutableList.<ThreadNode>builder().addAll(data).addAll(additionalTimeWindowSources).build();
+
+        ProtoTimeEncoder timeEncoder = new ProtoTimeEncoder(getMode().valueTransformer(), timeWindowSources);
         int[] timeWindows = timeEncoder.getKeys();
         for (int timeWindow : timeWindows) {
             proto.addTimeWindows(timeWindow);
@@ -239,10 +280,12 @@ public abstract class AbstractSampler implements Sampler {
         if (classSourceVisitor.hasLineSourceMappings()) {
             proto.putAllLineSources(classSourceVisitor.getLineSourceMapping());
         }
+
+        return timeEncoder;
     }
 
     /**
-     * fork - exports an additional data tree into one of the this fork-specific proto fields.
+     * fork - exports an additional data tree into one of the fork-specific proto fields.
      *
      * <p>Deliberately separate from {@link #writeDataToProto}: that method also writes the
      * time-window list, window statistics and class-source mappings, all of which are
@@ -253,16 +296,21 @@ public abstract class AbstractSampler implements Sampler {
      * <p>The value transformer is fixed to identity here because both extra trees are measured
      * in bytes already - unlike execution time, which is converted from microseconds.</p>
      *
-     * @return total bytes across the exported tree, for the summary in this forkProfileContents
+     * @param data the already-exported and sorted tree
+     * @param primaryTimeEncoder the encoder used for the primary tree, whose key set is shared
+     * @param nodeExporterFunction the node exporter factory
+     * @param consumer receives each exported thread node
+     * @return total bytes across the exported tree, for the ExtendedProfileContents summary
      */
-    protected long writeExtraDataToProto(DataAggregator dataAggregator, Function<ProtoTimeEncoder, NodeExporter> nodeExporterFunction, java.util.function.Consumer<me.lucko.spark.proto.SparkSamplerProtos.ThreadNode> consumer) {
-        List<ThreadNode> data = dataAggregator.exportData();
+    protected long writeExtraDataToProto(List<ThreadNode> data, ProtoTimeEncoder primaryTimeEncoder, Function<ProtoTimeEncoder, NodeExporter> nodeExporterFunction, Consumer<me.lucko.spark.proto.SparkSamplerProtos.ThreadNode> consumer) {
         if (data.isEmpty()) {
             return 0L;
         }
-        data.sort(Comparator.comparing(ThreadNode::getThreadLabel));
 
-        ProtoTimeEncoder timeEncoder = new ProtoTimeEncoder(value -> value, data);
+        // The key set is shared with the primary tree so the encoded arrays line up with the
+        // profile-wide time window list. The value transformer is not: these trees are measured
+        // in bytes already, unlike execution time which is converted from microseconds.
+        ProtoTimeEncoder timeEncoder = ProtoTimeEncoder.withSameKeys(value -> value, primaryTimeEncoder);
         NodeExporter exporter = nodeExporterFunction.apply(timeEncoder);
 
         long total = 0L;
