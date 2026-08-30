@@ -147,23 +147,39 @@ public final class OffHeapInvestigation {
         // while used-after-GC never returns to its earlier floor. Without this the command would
         // answer "not a native leak" and leave the most common kind of leak unexamined.
         out.add("--- Java heap trend ---");
-        long minUsed = Long.MAX_VALUE;
-        long maxUsed = 0;
+        // Compare the post-GC FLOOR of the first half against the second half. An earlier version
+        // compared the overall minimum against the first sample, which is unsatisfiable by
+        // construction - the overall minimum includes the first sample, so it can never exceed it,
+        // and the Java-leak branch could never fire. Halves are the correct comparison: a leak
+        // raises the floor the collector can reach as the run progresses.
+        int half = this.samples.size() / 2;
+        long firstHalfFloor = Long.MAX_VALUE;
+        long secondHalfFloor = Long.MAX_VALUE;
+        long peak = 0;
+        for (int i = 0; i < this.samples.size(); i++) {
+            long used = this.samples.get(i).process.heapUsed();
+            peak = Math.max(peak, used);
+            if (i < half) {
+                firstHalfFloor = Math.min(firstHalfFloor, used);
+            } else {
+                secondHalfFloor = Math.min(secondHalfFloor, used);
+            }
+        }
         long firstUsed = first.process.heapUsed();
         long lastUsed = last.process.heapUsed();
-        for (Sample sample : this.samples) {
-            minUsed = Math.min(minUsed, sample.process.heapUsed());
-            maxUsed = Math.max(maxUsed, sample.process.heapUsed());
-        }
-        out.add(String.format("  used: first %s, last %s, floor %s, peak %s",
+        out.add(String.format("  used: first %s, last %s, peak %s",
                 FormatUtil.formatBytes(firstUsed), FormatUtil.formatBytes(lastUsed),
-                FormatUtil.formatBytes(minUsed), FormatUtil.formatBytes(maxUsed)));
+                FormatUtil.formatBytes(peak)));
+        out.add(String.format("  post-GC floor: first half %s -> second half %s",
+                FormatUtil.formatBytes(firstHalfFloor), FormatUtil.formatBytes(secondHalfFloor)));
         out.add(String.format("  committed: %s -> %s", FormatUtil.formatBytes(first.process.heapCommitted()),
                 FormatUtil.formatBytes(last.process.heapCommitted())));
-        boolean javaHeapLeak = this.samples.size() >= 3 && minUsed > firstUsed
-                && (minUsed - firstUsed) > 256L * 1024 * 1024;
+        long floorRise = secondHalfFloor - firstHalfFloor;
+        boolean javaHeapLeak = this.samples.size() >= 4 && half > 0
+                && firstHalfFloor != Long.MAX_VALUE && secondHalfFloor != Long.MAX_VALUE
+                && floorRise > 256L * 1024 * 1024;
         if (javaHeapLeak) {
-            out.add("  The post-GC FLOOR rose by " + FormatUtil.formatBytes(minUsed - firstUsed)
+            out.add("  The post-GC FLOOR rose by " + FormatUtil.formatBytes(floorRise)
                     + " - that is a Java object leak.");
             out.add("  Capture: /spark profiler start --heap-leaks --timeout 1800 --thread *");
         } else {
@@ -302,7 +318,12 @@ public final class OffHeapInvestigation {
         out.add(String.format("  Growing at %s/hour.", FormatUtil.formatBytes((long) (rssGrowth / hours))));
 
         boolean nmtExplains = nmtGrowth > 0 && nmtGrowth * 2 > rssGrowth;
-        boolean glibcExplains = arenaGrowth * 2 > unaccountedGrowth && arenaGrowth > 0;
+        // unaccountedGrowth must be positive for the comparison to mean anything: if it is
+        // negative (heap committed grew faster than RSS, which happens when the JVM commits
+        // ahead of touching) then "arenaGrowth*2 > unaccountedGrowth" is true for any positive
+        // arena growth at all, and the verdict would blame glibc for nothing.
+        boolean glibcExplains = arenaGrowth > 0 && unaccountedGrowth > 0
+                && arenaGrowth * 2 > unaccountedGrowth;
 
         if (nmtExplains) {
             out.add("  NMT accounts for most of it: this is the JVM itself, not a plugin.");

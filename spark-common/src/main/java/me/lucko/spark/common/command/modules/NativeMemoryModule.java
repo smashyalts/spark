@@ -870,8 +870,11 @@ public class NativeMemoryModule implements CommandModule {
                     this.investigationTask = null;
                 }
                 inv.sample();
+                // Build the report ONCE. It runs an NMT summary.diff internally, so calling it
+                // twice both wastes the work and risks the file and the chat output disagreeing.
+                List<String> reportLines = inv.report();
                 StringBuilder sb = new StringBuilder();
-                for (String line : inv.report()) {
+                for (String line : reportLines) {
                     sb.append(line).append('\n');
                 }
                 this.investigation = null;
@@ -886,7 +889,7 @@ public class NativeMemoryModule implements CommandModule {
                     resp.replyPrefixed(text("Off-heap investigation complete.", GOLD));
                     resp.replyPrefixed(text("Full report: " + file, GRAY));
                     // Only the verdict goes to chat; the rest would be dozens of lines.
-                    List<String> lines = inv.report();
+                    List<String> lines = reportLines;
                     int verdictAt = lines.indexOf("--- VERDICT ---");
                     if (verdictAt >= 0) {
                         for (int i = verdictAt; i < lines.size(); i++) {
