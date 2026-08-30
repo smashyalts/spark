@@ -21,6 +21,7 @@
 package me.lucko.spark.bukkit;
 
 import org.bukkit.Bukkit;
+import org.bukkit.plugin.IllegalPluginAccessException;
 import org.bukkit.plugin.Plugin;
 
 /**
@@ -86,12 +87,20 @@ public interface SparkScheduler {
 
         @Override
         public void executeAsync(Runnable task) {
-            this.plugin.getServer().getScheduler().runTaskAsynchronously(this.plugin, task);
+            try {
+                this.plugin.getServer().getScheduler().runTaskAsynchronously(this.plugin, task);
+            } catch (IllegalPluginAccessException e) {
+                // plugin disabling - scheduling is refused, which is not an error worth throwing
+            }
         }
 
         @Override
         public void executeSync(Runnable task) {
-            this.plugin.getServer().getScheduler().runTask(this.plugin, task);
+            try {
+                this.plugin.getServer().getScheduler().runTask(this.plugin, task);
+            } catch (IllegalPluginAccessException e) {
+                // plugin disabling
+            }
         }
 
         @Override
@@ -122,12 +131,23 @@ public interface SparkScheduler {
 
         @Override
         public void executeAsync(Runnable task) {
-            Bukkit.getAsyncScheduler().runNow(this.plugin, scheduled -> task.run());
+            // Folia throws rather than queueing once the plugin is disabling. Swallowing that is
+            // correct here - shutdown is not a failure - but it must not propagate out of a
+            // scheduling call and abort an unrelated shutdown sequence.
+            try {
+                Bukkit.getAsyncScheduler().runNow(this.plugin, scheduled -> task.run());
+            } catch (IllegalStateException | IllegalPluginAccessException e) {
+                // plugin disabling
+            }
         }
 
         @Override
         public void executeSync(Runnable task) {
-            Bukkit.getGlobalRegionScheduler().execute(this.plugin, task);
+            try {
+                Bukkit.getGlobalRegionScheduler().execute(this.plugin, task);
+            } catch (IllegalStateException | IllegalPluginAccessException e) {
+                // plugin disabling
+            }
         }
 
         @Override

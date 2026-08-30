@@ -265,23 +265,37 @@ public enum ProcessMemory {
         try {
             java.io.File dir = new java.io.File("/proc/self/fd");
             String[] entries = dir.list();
-            return entries == null ? -1 : entries.length;
+            // Listing the directory opens a descriptor of its own, which is included in the
+            // result. Left uncorrected every reading is one too high, and a delta between two
+            // readings is unaffected - but the absolute figure is compared against the ulimit.
+            return entries == null ? -1 : Math.max(0, entries.length - 1);
         } catch (Exception e) {
             return -1;
         }
     }
 
-    /** Soft limit on open descriptors from /proc/self/limits, or -1. */
+    /**
+     * Soft limit on open descriptors from /proc/self/limits, or -1.
+     *
+     * <p>The soft limit specifically: it is the one a process actually hits. The line lists soft
+     * then hard, and either may read "unlimited", so the first numeric token after the label is
+     * the soft value and a non-numeric soft limit means there is no ceiling worth projecting to.</p>
+     */
     public static long getFileDescriptorLimit() {
         for (String line : LinuxProc.SELF_LIMITS.read()) {
-            if (line.startsWith("Max open files")) {
-                String[] parts = line.split("\\s+");
-                for (String part : parts) {
-                    if (part.matches("\\d+")) {
-                        return Long.parseLong(part);
-                    }
+            if (!line.startsWith("Max open files")) {
+                continue;
+            }
+            String rest = line.substring("Max open files".length()).trim();
+            String[] parts = rest.split("\\s+");
+            if (parts.length > 0 && parts[0].matches("\\d+")) {
+                try {
+                    return Long.parseLong(parts[0]);
+                } catch (NumberFormatException e) {
+                    return -1;
                 }
             }
+            return -1; // "unlimited"
         }
         return -1;
     }
@@ -298,13 +312,21 @@ public enum ProcessMemory {
      */
     public static String getPreloadedAllocator() {
         for (String line : LinuxProc.SELF_MAPS.read()) {
-            if (line.contains("libmimalloc")) {
+            // Only consider the mapped path, and only executable mappings: a data file whose name
+            // happens to contain "libjemalloc" is not a preloaded allocator, and matching one
+            // would suppress every piece of glibc advice on a server that is in fact using glibc.
+            int slash = line.lastIndexOf('/');
+            if (slash < 0 || line.indexOf("x", line.indexOf(' ')) < 0) {
+                continue;
+            }
+            String file = line.substring(slash + 1);
+            if (file.startsWith("libmimalloc")) {
                 return "mimalloc";
             }
-            if (line.contains("libjemalloc")) {
+            if (file.startsWith("libjemalloc")) {
                 return "jemalloc";
             }
-            if (line.contains("libtcmalloc")) {
+            if (file.startsWith("libtcmalloc")) {
                 return "tcmalloc";
             }
         }
