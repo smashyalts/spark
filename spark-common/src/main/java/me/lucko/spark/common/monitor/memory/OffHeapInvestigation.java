@@ -148,7 +148,7 @@ public final class OffHeapInvestigation {
                     .append(sample.process.heapCommitted()).append(',')
                     .append(sample.process.nonHeapCommitted()).append(',')
                     .append(sample.process.directUsed()).append(',')
-                    .append(sample.arenas.systemBytes()).append(',')
+                    .append(sample.arenas.totalHeldBytes()).append(',')
                     .append(sample.arenas.freeBytes()).append(',')
                     .append(sample.arenas.arenas()).append(',')
                     .append(sample.arenas.subheaps()).append(',')
@@ -230,7 +230,9 @@ public final class OffHeapInvestigation {
         long heapGrowth = last.process.heapCommitted() - first.process.heapCommitted();
         long nonHeapGrowth = last.process.nonHeapCommitted() - first.process.nonHeapCommitted();
         long directGrowth = last.process.directUsed() - first.process.directUsed();
-        long arenaGrowth = last.arenas.systemBytes() - first.arenas.systemBytes();
+        // Total, not arena-only: a leak made of large blocks lives in the mmap total and would
+        // otherwise register as zero arena growth while the process grew by gigabytes.
+        long arenaGrowth = last.arenas.totalHeldBytes() - first.arenas.totalHeldBytes();
         long unaccountedGrowth = last.process.unaccounted() - first.process.unaccounted();
 
         out.add("=== OFF-HEAP INVESTIGATION ===");
@@ -352,8 +354,11 @@ public final class OffHeapInvestigation {
         out.add("--- glibc allocator, start vs end ---");
         out.add(String.format("  arenas   %d -> %d", first.arenas.arenas(), last.arenas.arenas()));
         out.add(String.format("  subheaps %d -> %d", first.arenas.subheaps(), last.arenas.subheaps()));
-        out.add(String.format("  held     %s -> %s", FormatUtil.formatBytes(first.arenas.systemBytes()),
-                FormatUtil.formatBytes(last.arenas.systemBytes())));
+        out.add(String.format("  held     %s -> %s", FormatUtil.formatBytes(first.arenas.totalHeldBytes()),
+                FormatUtil.formatBytes(last.arenas.totalHeldBytes())));
+        out.add(String.format("  of which mmap-served: %s -> %s (%d -> %d blocks)",
+                FormatUtil.formatBytes(first.arenas.mmapBytes()), FormatUtil.formatBytes(last.arenas.mmapBytes()),
+                first.arenas.mmapCount(), last.arenas.mmapCount()));
         out.add(String.format("  free     %.0f%% -> %.0f%%", first.arenas.freeRatio() * 100,
                 last.arenas.freeRatio() * 100));
         out.add("");

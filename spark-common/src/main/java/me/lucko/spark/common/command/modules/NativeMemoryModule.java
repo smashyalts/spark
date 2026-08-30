@@ -734,7 +734,12 @@ public class NativeMemoryModule implements CommandModule {
         resp.replyPrefixed(text("glibc allocator", GOLD));
         resp.replyPrefixed(entry("Arenas", Integer.toString(arenas.arenas())));
         resp.replyPrefixed(entry("Subheaps (64 MiB each)", Integer.toString(arenas.subheaps())));
-        resp.replyPrefixed(entry("Held from the OS", FormatUtil.formatBytes(arenas.systemBytes())));
+        resp.replyPrefixed(entry("Held from the OS", FormatUtil.formatBytes(arenas.totalHeldBytes())
+                + (arenas.mmapBytes() > 0
+                        ? " (" + FormatUtil.formatBytes(arenas.systemBytes()) + " in arenas, "
+                          + FormatUtil.formatBytes(arenas.mmapBytes()) + " mmap-served in "
+                          + arenas.mmapCount() + " blocks)"
+                        : "")));
         resp.replyPrefixed(entry("Of which free", FormatUtil.formatBytes(arenas.freeBytes())
                 + String.format(" (%.0f%%)", arenas.freeRatio() * 100)));
 
@@ -744,7 +749,7 @@ public class NativeMemoryModule implements CommandModule {
                 ? "unset - up to " + (cores * 8) + " arenas on " + cores + " cores" : arenaMax));
 
         resp.replyPrefixed(text("Verdict", GOLD));
-        long held = arenas.systemBytes();
+        long held = arenas.totalHeldBytes();
         if (unaccounted <= 0 || held * 2 <= unaccounted) {
             resp.replyPrefixed(text("    glibc holds " + FormatUtil.formatBytes(held) + " of "
                     + formatSigned(unaccounted) + " unaccounted - not the main consumer.", GRAY));

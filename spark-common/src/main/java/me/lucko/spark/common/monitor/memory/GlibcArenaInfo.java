@@ -51,8 +51,13 @@ public final class GlibcArenaInfo {
     private static final Pattern REST = Pattern.compile("<total type=\"rest\" count=\"\\d+\" size=\"(\\d+)\"");
     private static final Pattern FAST = Pattern.compile("<total type=\"fast\" count=\"\\d+\" size=\"(\\d+)\"");
     private static final Pattern SUBHEAPS = Pattern.compile("<aspace type=\"subheaps\" size=\"(\\d+)\"");
+    /** Large allocations served by mmap rather than an arena - invisible in the per-heap blocks. */
+    private static final Pattern MMAP_TOTAL = Pattern.compile("<total type=\"mmap\" count=\"(\\d+)\" size=\"(\\d+)\"");
+    private static final Pattern HEAP_BLOCK = Pattern.compile("<heap nr=\"\\d+\">.*?</heap>", Pattern.DOTALL);
 
     private final Map<Integer, long[]> perArena; // arena nr -> {systemBytes, freeBytes, subheaps}
+    private final long mmapBytes;
+    private final long mmapCount;
     private final int arenas;
     private final long systemBytes;
     private final long freeBytes;
@@ -60,7 +65,9 @@ public final class GlibcArenaInfo {
     private final boolean available;
 
     private GlibcArenaInfo(int arenas, long systemBytes, long freeBytes, int subheaps, boolean available,
-                           Map<Integer, long[]> perArena) {
+                           Map<Integer, long[]> perArena, long mmapBytes, long mmapCount) {
+        this.mmapBytes = mmapBytes;
+        this.mmapCount = mmapCount;
         this.perArena = perArena;
         this.arenas = arenas;
         this.systemBytes = systemBytes;
@@ -102,6 +109,27 @@ public final class GlibcArenaInfo {
         return this.perArena;
     }
 
+    /**
+     * Bytes glibc currently holds in mmap-served allocations.
+     *
+     * <p>Requests above the mmap threshold bypass the arenas entirely, so they appear in none of
+     * the per-heap figures. Reporting arena totals alone therefore understates what the allocator
+     * is holding, and on a process whose leak consists of large blocks it would understate it by
+     * the entire amount that matters.</p>
+     */
+    public long mmapBytes() {
+        return this.mmapBytes;
+    }
+
+    public long mmapCount() {
+        return this.mmapCount;
+    }
+
+    /** Arena-held bytes plus mmap-served bytes: everything glibc holds. */
+    public long totalHeldBytes() {
+        return this.systemBytes + this.mmapBytes;
+    }
+
     public boolean isAvailable() {
         return this.available;
     }
@@ -118,7 +146,7 @@ public final class GlibcArenaInfo {
     public static GlibcArenaInfo capture() {
         String xml = DiagnosticCommand.execute("System.native_heap_info");
         if (xml.startsWith(DiagnosticCommand.UNAVAILABLE) || !xml.contains("<malloc")) {
-            return new GlibcArenaInfo(0, 0, 0, 0, false, java.util.Collections.emptyMap());
+            return new GlibcArenaInfo(0, 0, 0, 0, false, java.util.Collections.emptyMap(), 0, 0);
         }
 
         int arenas = 0;
@@ -132,16 +160,30 @@ public final class GlibcArenaInfo {
             int nr = Integer.parseInt(heaps.group(1));
             String body = heaps.group(2);
             arenas++;
-            system += firstLong(SYSTEM_CURRENT, body);
-            free += firstLong(REST, body) + firstLong(FAST, body);
-            long sub = firstLong(SUBHEAPS, body);
-            subheaps += (int) (sub == 0 ? 1 : sub);
-
+            // Parsed once each; these were previously evaluated twice per heap for the same values.
             long aSys = firstLong(SYSTEM_CURRENT, body);
             long aFree = firstLong(REST, body) + firstLong(FAST, body);
-            perArena.put(nr, new long[]{aSys, aFree, sub == 0 ? 1 : sub});
+            long sub = firstLong(SUBHEAPS, body);
+            sub = sub == 0 ? 1 : sub;
+
+            system += aSys;
+            free += aFree;
+            subheaps += (int) sub;
+            perArena.put(nr, new long[]{aSys, aFree, sub});
         }
-        return new GlibcArenaInfo(arenas, system, free, subheaps, arenas > 0, perArena);
+
+        // The top-level totals sit AFTER the last </heap>. Parsing them from the whole document
+        // would match the first per-heap element instead, so the heap blocks are removed first.
+        String topLevel = HEAP_BLOCK.matcher(xml).replaceAll("");
+        long mmapBytes = 0;
+        long mmapCount = 0;
+        Matcher mmap = MMAP_TOTAL.matcher(topLevel);
+        if (mmap.find()) {
+            mmapCount = Long.parseLong(mmap.group(1));
+            mmapBytes = Long.parseLong(mmap.group(2));
+        }
+
+        return new GlibcArenaInfo(arenas, system, free, subheaps, arenas > 0, perArena, mmapBytes, mmapCount);
     }
 
     private static long firstLong(Pattern pattern, String text) {
