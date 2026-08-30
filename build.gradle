@@ -20,7 +20,7 @@ subprojects {
 
     ext {
         baseVersion = '1.10'
-        patchVersion = determinePatchVersion()
+        patchVersion = determinePatchVersion(baseVersion)
         pluginVersion = baseVersion + '.' + patchVersion
         pluginDescription = 'spark is a performance profiling plugin/mod for Minecraft clients, servers and proxies.'
 
@@ -80,9 +80,14 @@ subprojects {
 
 }
 
-def determinePatchVersion() {
+// Counts commits since the base version's own tag - 'v1.10' - and nothing else.
+//
+// A bare 'git describe --tags' picks the NEAREST tag, so a release tag cut in a fork
+// (v1.10.179) silently becomes the origin for the count. The patch number then restarts from
+// zero and the build reports a version lower than the upstream release it is built on top of.
+def determinePatchVersion(String baseVersion) {
     def tagInfo = providers.exec {
-        commandLine 'git', 'describe', '--tags'
+        commandLine 'git', 'describe', '--tags', '--match', 'v' + baseVersion
     }.standardOutput.asText.get().trim()
 
     return tagInfo.contains('-') ? tagInfo.split('-')[1] : 0
