@@ -36,6 +36,8 @@ import me.lucko.spark.common.monitor.memory.ProcessMemory;
 import me.lucko.spark.common.monitor.memory.ProcessMemorySnapshot;
 import me.lucko.spark.common.platform.SparkMetadata;
 import me.lucko.spark.common.sampler.async.AsyncSampler;
+import me.lucko.spark.common.util.SparkThreadFactory;
+import me.lucko.spark.common.util.SparkScheduledThreadPoolExecutor;
 import me.lucko.spark.common.util.FormatUtil;
 import me.lucko.spark.common.util.MediaTypes;
 import me.lucko.spark.proto.SparkSamplerProtos;
@@ -58,6 +60,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -117,8 +120,19 @@ public class NativeMemoryModule implements CommandModule {
     /** Retained between invocations so --diff has something to compare against. */
     private ProcessMemorySnapshot baseline;
     private ScheduledFuture<?> watchTask;
-    private OffHeapInvestigation investigation;
-    private ScheduledFuture<?> investigationTask;
+    /**
+     * Dedicated thread for the investigation.
+     *
+     * <p>Not MonitoringExecutor: that is a single thread shared with spark's CPU, GC and ping
+     * monitors, and an investigation sample parses /proc/self/smaps, which takes hundreds of
+     * milliseconds on a large process. Borrowing that thread every interval would stall the
+     * statistics spark exists to report, in order to measure memory.</p>
+     */
+    private volatile ScheduledExecutorService investigationExecutor;
+
+    // volatile: written by the investigation scheduler, read by command threads
+    private volatile OffHeapInvestigation investigation;
+    private volatile ScheduledFuture<?> investigationTask;
 
     @Override
     public void registerCommands(Consumer<Command> consumer) {
@@ -153,6 +167,11 @@ public class NativeMemoryModule implements CommandModule {
         if (this.investigationTask != null) {
             this.investigationTask.cancel(false);
             this.investigationTask = null;
+        }
+        ScheduledExecutorService executor = this.investigationExecutor;
+        if (executor != null) {
+            executor.shutdownNow();
+            this.investigationExecutor = null;
         }
     }
 
@@ -824,7 +843,11 @@ public class NativeMemoryModule implements CommandModule {
         resp.replyPrefixed(text("Sampling every " + intervalMinutes + "m. Leave the server under normal load.", GRAY));
         resp.replyPrefixed(text("The report is written to the spark plugin folder when it finishes.", GRAY));
 
-        MonitoringExecutor.INSTANCE.execute(() -> {
+        ScheduledExecutorService executor = new SparkScheduledThreadPoolExecutor(1,
+                new SparkThreadFactory("spark-offheap-investigation", true));
+        this.investigationExecutor = executor;
+
+        executor.execute(() -> {
             try {
                 inv.begin();
             } catch (Throwable t) {
@@ -832,7 +855,7 @@ public class NativeMemoryModule implements CommandModule {
             }
         });
 
-        this.investigationTask = MonitoringExecutor.INSTANCE.scheduleAtFixedRate(() -> {
+        this.investigationTask = executor.scheduleAtFixedRate(() -> {
             try {
                 inv.sample();
             } catch (Throwable t) {
@@ -840,7 +863,7 @@ public class NativeMemoryModule implements CommandModule {
             }
         }, intervalMinutes, intervalMinutes, TimeUnit.MINUTES);
 
-        MonitoringExecutor.INSTANCE.schedule(() -> {
+        executor.schedule(() -> {
             try {
                 if (this.investigationTask != null) {
                     this.investigationTask.cancel(false);
@@ -852,15 +875,50 @@ public class NativeMemoryModule implements CommandModule {
                     sb.append(line).append('\n');
                 }
                 this.investigation = null;
-                writeToPluginDirectory(platform, resp, "investigation", sb.toString());
-                for (String line : inv.report()) {
-                    resp.replyPrefixed(text(line, GRAY));
+
+                // Write the file BEFORE attempting to reply. The command sender may have
+                // disconnected during a two-hour run, and losing the entire report because a
+                // chat message could not be delivered would be the worst possible failure here.
+                Path file = writeReportFile(platform, sb.toString());
+                platform.getPlugin().log(Level.INFO, "Off-heap investigation complete: " + file);
+
+                try {
+                    resp.replyPrefixed(text("Off-heap investigation complete.", GOLD));
+                    resp.replyPrefixed(text("Full report: " + file, GRAY));
+                    // Only the verdict goes to chat; the rest would be dozens of lines.
+                    List<String> lines = inv.report();
+                    int verdictAt = lines.indexOf("--- VERDICT ---");
+                    if (verdictAt >= 0) {
+                        for (int i = verdictAt; i < lines.size(); i++) {
+                            resp.replyPrefixed(text(lines.get(i), GRAY));
+                        }
+                    }
+                } catch (Throwable t) {
+                    platform.getPlugin().log(Level.INFO, "Report written but could not be sent to the command sender");
                 }
             } catch (Throwable t) {
                 this.investigation = null;
                 platform.getPlugin().log(Level.WARNING, "Investigation report failed", t);
+            } finally {
+                executor.shutdown();
+                this.investigationExecutor = null;
             }
         }, minutes, TimeUnit.MINUTES);
+    }
+
+    /** Writes a report without needing a live command sender. */
+    private Path writeReportFile(SparkPlatform platform, String content) {
+        try {
+            Path directory = platform.getPlugin().getPluginDirectory();
+            Files.createDirectories(directory);
+            pruneOldReports(directory, "investigation");
+            Path file = directory.resolve("investigation-" + FILE_STAMP.format(Instant.now()) + ".txt");
+            Files.write(file, content.getBytes(StandardCharsets.UTF_8));
+            return file;
+        } catch (Throwable t) {
+            platform.getPlugin().log(Level.WARNING, "Unable to write investigation report", t);
+            return java.nio.file.Paths.get("(write failed)"); // Path.of is Java 11; this module targets 8
+        }
     }
 
     private void writeDump(SparkPlatform platform, CommandResponseHandler resp) {

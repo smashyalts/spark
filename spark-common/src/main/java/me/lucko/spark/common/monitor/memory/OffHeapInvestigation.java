@@ -128,7 +128,11 @@ public final class OffHeapInvestigation {
         long unaccountedGrowth = last.process.unaccounted() - first.process.unaccounted();
 
         out.add("=== OFF-HEAP INVESTIGATION ===");
-        out.add(String.format("Duration: %.1f hours, %d samples", hours, this.samples.size()));
+        out.add(String.format("Duration: %.2f hours, %d samples", hours, this.samples.size()));
+        if (windowTooShort(hours)) {
+            out.add("WARNING: window under 15 minutes. Hourly rates below are extrapolated from");
+            out.add("very little data and a startup ramp or a single GC cycle will dominate them.");
+        }
         out.add("");
         out.add("--- Growth ---");
         out.add(rate("Resident set size", rssGrowth, hours));
@@ -137,6 +141,34 @@ public final class OffHeapInvestigation {
         out.add(rate("  NIO direct buffers", directGrowth, hours));
         out.add(rate("  glibc arenas (malloc_info)", arenaGrowth, hours));
         out.add(rate("Unaccounted", unaccountedGrowth, hours));
+        out.add("");
+
+        // A Java object leak shows here and nowhere else in this report: committed heap climbing
+        // while used-after-GC never returns to its earlier floor. Without this the command would
+        // answer "not a native leak" and leave the most common kind of leak unexamined.
+        out.add("--- Java heap trend ---");
+        long minUsed = Long.MAX_VALUE;
+        long maxUsed = 0;
+        long firstUsed = first.process.heapUsed();
+        long lastUsed = last.process.heapUsed();
+        for (Sample sample : this.samples) {
+            minUsed = Math.min(minUsed, sample.process.heapUsed());
+            maxUsed = Math.max(maxUsed, sample.process.heapUsed());
+        }
+        out.add(String.format("  used: first %s, last %s, floor %s, peak %s",
+                FormatUtil.formatBytes(firstUsed), FormatUtil.formatBytes(lastUsed),
+                FormatUtil.formatBytes(minUsed), FormatUtil.formatBytes(maxUsed)));
+        out.add(String.format("  committed: %s -> %s", FormatUtil.formatBytes(first.process.heapCommitted()),
+                FormatUtil.formatBytes(last.process.heapCommitted())));
+        boolean javaHeapLeak = this.samples.size() >= 3 && minUsed > firstUsed
+                && (minUsed - firstUsed) > 256L * 1024 * 1024;
+        if (javaHeapLeak) {
+            out.add("  The post-GC FLOOR rose by " + FormatUtil.formatBytes(minUsed - firstUsed)
+                    + " - that is a Java object leak.");
+            out.add("  Capture: /spark profiler start --heap-leaks --timeout 1800 --thread *");
+        } else {
+            out.add("  Floor is stable - no Java object leak evident in this window.");
+        }
         out.add("");
 
         out.add("--- glibc allocator, start vs end ---");
@@ -296,26 +328,46 @@ public final class OffHeapInvestigation {
         }
     }
 
-    private static long parseNmtTotalDelta(String diff) {
+    /**
+     * Extracts the committed DELTA from an NMT summary.diff total line.
+     *
+     * <p>The line reads {@code Total: reserved=3419MB -1MB, committed=1703MB +1607MB}. An earlier
+     * version read the digits immediately after {@code committed=}, which is the absolute figure,
+     * not the change - so this returned 1703 where the growth was 1607. That made the verdict
+     * conclude "the JVM accounts for this" almost unconditionally, since a total committed size
+     * will nearly always exceed half of any growth measured over a window.</p>
+     */
+    static long parseNmtTotalDelta(String diff) {
         for (String line : diff.split("\n")) {
-            if (line.contains("Total:") && line.contains("committed=")) {
-                int i = line.indexOf("committed=");
-                String rest = line.substring(i + 10);
-                StringBuilder digits = new StringBuilder();
-                for (int c = 0; c < rest.length(); c++) {
-                    char ch = rest.charAt(c);
-                    if (Character.isDigit(ch)) {
-                        digits.append(ch);
-                    } else {
-                        break;
-                    }
-                }
-                if (digits.length() > 0) {
-                    return Long.parseLong(digits.toString()) * 1024 * 1024;
-                }
+            if (!line.contains("Total:") || !line.contains("committed=")) {
+                continue;
             }
+            int i = line.indexOf("committed=");
+            String rest = line.substring(i + "committed=".length());
+            // skip the absolute value ("1703MB"), then read the signed delta that follows
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("^\\d+[KMG]?B\\s+([+-])(\\d+)([KMG]?)B")
+                    .matcher(rest.trim());
+            if (m.find()) {
+                long value = Long.parseLong(m.group(2));
+                String unit = m.group(3);
+                if ("K".equals(unit)) {
+                    value *= 1024L;
+                } else if ("M".equals(unit)) {
+                    value *= 1024L * 1024L;
+                } else if ("G".equals(unit)) {
+                    value *= 1024L * 1024L * 1024L;
+                }
+                return "-".equals(m.group(1)) ? -value : value;
+            }
+            return 0; // total line present but no delta shown - nothing changed
         }
         return -1;
+    }
+
+    /** True when the window is too short for an hourly rate to mean anything. */
+    static boolean windowTooShort(double hours) {
+        return hours < 0.25;
     }
 
     private static String rate(String label, long delta, double hours) {
