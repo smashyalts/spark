@@ -135,8 +135,24 @@ public final class GlibcArenaInfo {
     }
 
     /** Fraction of glibc's held memory that is free - the fragmentation signal. */
-    public double freeRatio() {
+    /** Free fraction of ARENA memory only. mmap-served blocks have no free concept. */
+    public double arenaFreeRatio() {
         return this.systemBytes == 0 ? 0 : (double) this.freeBytes / this.systemBytes;
+    }
+
+    /**
+     * Free fraction of everything glibc holds, arenas and mmap together.
+     *
+     * <p>This is the ratio the fragmentation-versus-leak decision must use. mmap-served blocks are
+     * returned to the OS the moment they are freed, so any that are still held are live by
+     * definition. Measuring the free fraction against arena bytes alone, while presenting the
+     * total as what is held, compares a numerator and denominator that describe different things -
+     * and on a process whose growth is mostly mmap it would report comfortable fragmentation
+     * where the memory is in fact entirely live.</p>
+     */
+    public double freeRatio() {
+        long total = totalHeldBytes();
+        return total == 0 ? 0 : (double) this.freeBytes / total;
     }
 
     /**

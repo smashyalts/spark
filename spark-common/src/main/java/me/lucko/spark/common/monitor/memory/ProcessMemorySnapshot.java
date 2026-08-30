@@ -29,6 +29,7 @@ import java.lang.management.MemoryMXBean;
 import java.lang.management.MemoryPoolMXBean;
 import java.lang.management.MemoryType;
 import java.lang.management.ThreadMXBean;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -161,7 +162,12 @@ public final class ProcessMemorySnapshot {
             s.totalMappings = mappings.size();
             s.arenaLikeRegions = ProcessMemory.countArenaLikeRegions(mappings);
             mappings.sort(Comparator.comparingLong(ProcessMemory.Mapping::rss).reversed());
-            s.largestMappings = mappings.subList(0, Math.min(MAX_EXPORTED_MAPPINGS, mappings.size()));
+            // Copy, not subList. A subList is a VIEW over the backing list, so retaining one pins
+            // every Mapping parsed from smaps - thousands of objects - for the life of the
+            // snapshot, on the profile export path. A memory diagnostic that itself retains
+            // memory proportional to the process it is measuring is the wrong shape of tool.
+            s.largestMappings = new ArrayList<>(
+                    mappings.subList(0, Math.min(MAX_EXPORTED_MAPPINGS, mappings.size())));
         }
 
         s.nmtEnabled = DiagnosticCommand.isNativeMemoryTrackingEnabled();
@@ -172,14 +178,6 @@ public final class ProcessMemorySnapshot {
         return s;
     }
 
-    /**
-     * Netty's own direct memory counter, read reflectively.
-     *
-     * <p>Different from the JDK's direct buffer pool: Netty's pooled allocator carves user
-     * buffers out of large chunks, so a pool grown to gigabytes appears as a handful of JDK
-     * direct buffers. Netty is platform-provided and its internals are not API, so a missing
-     * method degrades to unknown rather than failing the capture.</p>
-     */
     /**
      * Sums the chunks held by Netty's pooled direct arenas.
      *

@@ -430,8 +430,9 @@ public final class OffHeapInvestigation {
         out.add(String.format("  of which mmap-served: %s -> %s (%d -> %d blocks)",
                 FormatUtil.formatBytes(first.arenas.mmapBytes()), FormatUtil.formatBytes(last.arenas.mmapBytes()),
                 first.arenas.mmapCount(), last.arenas.mmapCount()));
-        out.add(String.format("  free     %.0f%% -> %.0f%%", first.arenas.freeRatio() * 100,
-                last.arenas.freeRatio() * 100));
+        out.add(String.format("  free     %.0f%% -> %.0f%% of all held (arena-only: %.0f%% -> %.0f%%)",
+                first.arenas.freeRatio() * 100, last.arenas.freeRatio() * 100,
+                first.arenas.arenaFreeRatio() * 100, last.arenas.arenaFreeRatio() * 100));
         out.add("");
 
         // NMT diff is the discriminator between "the JVM did this" and "something else did".

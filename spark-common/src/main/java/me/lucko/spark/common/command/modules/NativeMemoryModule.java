@@ -749,7 +749,10 @@ public class NativeMemoryModule implements CommandModule {
                           + arenas.mmapCount() + " blocks)"
                         : "")));
         resp.replyPrefixed(entry("Of which free", FormatUtil.formatBytes(arenas.freeBytes())
-                + String.format(" (%.0f%%)", arenas.freeRatio() * 100)));
+                + String.format(" (%.0f%% of all held", arenas.freeRatio() * 100)
+                + (arenas.mmapBytes() > 0
+                        ? String.format(", %.0f%% of arena memory)", arenas.arenaFreeRatio() * 100)
+                        : ")")));
 
         String arenaMax = System.getenv("MALLOC_ARENA_MAX");
         int cores = Runtime.getRuntime().availableProcessors();
