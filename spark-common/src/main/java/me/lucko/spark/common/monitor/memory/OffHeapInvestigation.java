@@ -235,6 +235,19 @@ public final class OffHeapInvestigation {
                 gcCount, gcTime);
     }
 
+    /**
+     * The stack size unaccounted() actually used for this sample.
+     *
+     * <p>Exists so the figure has one source of truth. It was previously written out at each use
+     * site as a hardcoded 1 MiB, which is only correct on default settings - and when the first
+     * occurrence was corrected the second was missed, leaving two call sites disagreeing about the
+     * same quantity.</p>
+     */
+    private static long stackSizeOf(Sample sample) {
+        long configured = sample.process.threadStackSize();
+        return configured > 0 ? configured : 1024L * 1024L;
+    }
+
     /** Renders the full report. Returns the lines; the caller decides where they go. */
     public List<String> report() {
         List<String> out = new ArrayList<>();
@@ -262,9 +275,7 @@ public final class OffHeapInvestigation {
             // 1 MiB here computes a correction against a figure that was never used - on a server
             // running -Xss2m with several hundred threads the "fix" is wrong by more than the
             // error it corrects.
-            long stackSize = last.process.threadStackSize() > 0
-                    ? last.process.threadStackSize() : 1024L * 1024L;
-            long estimated = (long) last.threads * stackSize;
+            long estimated = (long) last.threads * stackSizeOf(last);
             stackCorrection = estimated - nmtThreadCommitted;
         }
 
@@ -324,8 +335,7 @@ public final class OffHeapInvestigation {
                         FormatUtil.formatBytes(shmemResident)));
             }
             out.add(String.format("    TRUE unaccounted: about %s (reported %s)",
-                    FormatUtil.formatBytes(Math.max(0, correctedUnaccounted)),
-                    FormatUtil.formatBytes(last.process.unaccounted())));
+                    signed(correctedUnaccounted), signed(last.process.unaccounted())));
 
             // Independent cross-check. Pss_Anon is the kernel's own count of anonymous resident
             // memory, so subtracting the JVM's anonymous regions from it reaches the same figure by
@@ -335,9 +345,9 @@ public final class OffHeapInvestigation {
             Long anon = last.process.smapsRollup().get("Pss_Anon");
             if (anon != null && anon > 0) {
                 long realStacks = nmtThreadCommitted >= 0 ? nmtThreadCommitted
-                        : (long) last.threads * 1024L * 1024L;
+                        : (long) last.threads * stackSizeOf(last);
                 long viaAnon = anon - last.process.nonHeapCommitted() - last.process.directUsed() - realStacks;
-                out.add(String.format("    cross-check via Pss_Anon: %s", FormatUtil.formatBytes(viaAnon)));
+                out.add(String.format("    cross-check via Pss_Anon: %s", signed(viaAnon)));
                 long diff = Math.abs(viaAnon - correctedUnaccounted);
                 if (correctedUnaccounted > 0 && diff > correctedUnaccounted / 10) {
                     out.add("    WARNING: the two methods disagree by more than 10% - treat both");
@@ -379,9 +389,13 @@ public final class OffHeapInvestigation {
         out.add(String.format("  committed: %s -> %s", FormatUtil.formatBytes(first.process.heapCommitted()),
                 FormatUtil.formatBytes(last.process.heapCommitted())));
         long floorRise = secondHalfFloor - firstHalfFloor;
-        boolean javaHeapLeak = this.samples.size() >= 4 && half > 0
+        // Rate-based, matching the other detectors. A flat 256 MB gate was the last magnitude
+        // threshold left in the file: it misses a slow leak over a short window and would call
+        // ordinary growth a leak over a long one. 64 MB/hour of permanently retained objects is
+        // unambiguous, and the floor rising at all over hours is already the signal.
+        boolean javaHeapLeak = this.samples.size() >= 4
                 && firstHalfFloor != Long.MAX_VALUE && secondHalfFloor != Long.MAX_VALUE
-                && floorRise > 256L * 1024 * 1024;
+                && floorRise > 64L * 1024 * 1024 * Math.max(1, (long) Math.ceil(hours));
         if (javaHeapLeak) {
             out.add("  The post-GC FLOOR rose by " + FormatUtil.formatBytes(floorRise)
                     + " - that is a Java object leak.");
