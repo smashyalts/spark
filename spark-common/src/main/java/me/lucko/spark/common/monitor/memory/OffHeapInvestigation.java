@@ -264,7 +264,8 @@ public final class OffHeapInvestigation {
         out.add("");
 
         out.add("--- VERDICT ---");
-        appendVerdict(out, rssGrowth, unaccountedGrowth, arenaGrowth, nmtGrowth, last, hours);
+        appendVerdict(out, rssGrowth, unaccountedGrowth, arenaGrowth, nmtGrowth, heapGrowth,
+                javaHeapLeak, floorRise, last, hours);
         return out;
     }
 
@@ -334,44 +335,68 @@ public final class OffHeapInvestigation {
     }
 
     private void appendVerdict(List<String> out, long rssGrowth, long unaccountedGrowth,
-                               long arenaGrowth, long nmtGrowth, Sample last, double hours) {
-        if (rssGrowth < 256L * 1024 * 1024) {
-            out.add("  No meaningful growth over this window. Either there is no leak, or the");
-            out.add("  window was too short or too quiet. Re-run for longer, under load.");
+                               long arenaGrowth, long nmtGrowth, long heapGrowth,
+                               boolean javaHeapLeak, long floorRise, Sample last, double hours) {
+        double perHour = rssGrowth / hours;
+
+        // Rate, not absolute size. A fixed byte threshold calls a slow leak "no growth" over a
+        // short window and calls normal warm-up a leak over a long one.
+        if (perHour < 64L * 1024 * 1024 && !javaHeapLeak) {
+            out.add(String.format("  Growing at only %s/hour - no meaningful leak in this window.",
+                    FormatUtil.formatBytes((long) Math.max(0, perHour))));
+            out.add("  Either there is nothing wrong, or the window was too quiet. Re-run under load.");
             return;
         }
 
-        out.add(String.format("  Growing at %s/hour.", FormatUtil.formatBytes((long) (rssGrowth / hours))));
+        out.add(String.format("  Growing at %s/hour.", FormatUtil.formatBytes((long) perHour)));
 
-        boolean nmtExplains = nmtGrowth > 0 && nmtGrowth * 2 > rssGrowth;
-        // unaccountedGrowth must be positive for the comparison to mean anything: if it is
-        // negative (heap committed grew faster than RSS, which happens when the JVM commits
-        // ahead of touching) then "arenaGrowth*2 > unaccountedGrowth" is true for any positive
-        // arena growth at all, and the verdict would blame glibc for nothing.
+        // Reported first and unconditionally: a rising post-GC floor is the most actionable
+        // finding available, and only the verdict is echoed to chat - a Java leak buried in the
+        // trend section above would never be seen by anyone who did not open the file.
+        if (javaHeapLeak) {
+            out.add("  JAVA OBJECT LEAK: the post-GC floor rose by " + FormatUtil.formatBytes(floorRise) + ".");
+            out.add("  Objects are being retained and the collector cannot reclaim them. This is a");
+            out.add("  plugin holding references - the most common leak and the easiest to fix.");
+            out.add("  Next: /spark profiler start --heap-leaks --timeout 1800 --thread *");
+            out.add("");
+        }
+
+        // NMT's total includes Java heap commitment, which grows for entirely healthy reasons.
+        // Comparing the raw total against RSS growth lets an expanding heap mask a native leak
+        // underneath it, so the heap is subtracted before asking whether the JVM explains things.
+        long nmtNonHeap = nmtGrowth >= 0 ? nmtGrowth - Math.max(0, heapGrowth) : -1;
+        boolean nmtExplains = nmtNonHeap > 0 && unaccountedGrowth > 0 && nmtNonHeap * 2 > unaccountedGrowth;
         boolean glibcExplains = arenaGrowth > 0 && unaccountedGrowth > 0
                 && arenaGrowth * 2 > unaccountedGrowth;
 
-        if (nmtExplains) {
-            out.add("  NMT accounts for most of it: this is the JVM itself, not a plugin.");
+        if (unaccountedGrowth <= 0) {
+            out.add("  All of the growth is accounted for by the JVM's own regions - heap, code,");
+            out.add("  metaspace or direct buffers. Nothing is leaking outside the JVM's view.");
+            if (heapGrowth > 0) {
+                out.add("  Java heap committed grew " + FormatUtil.formatBytes(heapGrowth)
+                        + "; that is normal expansion toward -Xmx unless the floor is rising too.");
+            }
+        } else if (nmtExplains) {
+            out.add("  NMT accounts for the off-heap growth: this is the JVM itself, not a plugin.");
             out.add("  The category listed above names the subsystem. GC growth usually means");
-            out.add("  collector metadata scaling with heap size - try -XX:SoftMaxHeapSize to");
-            out.add("  confirm, since that metadata scales with the heap.");
+            out.add("  collector metadata scaling with heap size - test with -XX:SoftMaxHeapSize,");
+            out.add("  since that metadata scales with the heap and should shrink with it.");
         } else if (glibcExplains && last.arenas.freeRatio() > 0.4) {
             out.add("  glibc holds it and most is FREE: allocator fragmentation, not a leak.");
-            out.add("  Allocations were released; glibc never returned the pages. Cap arenas");
-            out.add("  with MALLOC_ARENA_MAX=2, and reclaim now with --trim.");
+            out.add("  Allocations were released; glibc never returned the pages. Cap arenas with");
+            out.add("  MALLOC_ARENA_MAX=2, and reclaim what is already free with --trim.");
         } else if (glibcExplains) {
             out.add("  glibc holds it and it is LIVE: something calls malloc and never frees.");
-            out.add("  NMT does not see it, so the caller is native code outside the JVM -");
-            out.add("  a JNI library, or a JVM path that allocates untagged.");
+            out.add("  NMT does not see it, so the caller is native code outside the JVM - a JNI");
+            out.add("  library, or a JVM path that allocates untagged.");
+            out.add("  Check the per-arena breakdown above: growth concentrated in one arena means");
+            out.add("  a small set of threads, which /spark offheap --jcmd Thread.print can name.");
             out.add("  Next: /spark profiler start --leaks --timeout 3600 --thread *");
-            out.add("  If that attributes far less than the rate above, the profiler is");
-            out.add("  sampling past it and only a uprobe on libc malloc will attribute it.");
         } else {
             out.add("  Neither NMT nor glibc accounts for it: the memory arrived by mmap, not");
             out.add("  malloc. Both the leak profiler and malloc_info are blind to that by");
             out.add("  construction. The mapping sizes above are the lead - match them against");
-            out.add("  loaded native libraries in --maps.");
+            out.add("  the loaded native libraries in --maps.");
         }
     }
 
