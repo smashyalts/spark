@@ -106,7 +106,11 @@ public class NativeMemoryModule implements CommandModule {
 
     /** Allowed, but warned about: correct and read-only, yet slow enough to be felt. */
     private static final String[] EXPENSIVE_COMMANDS = {
-            "GC.class_histogram", "GC.finalizer_info", "GC.run", "VM.classloader_stats"
+            "GC.class_histogram", "GC.finalizer_info", "GC.run", "VM.classloader_stats",
+            // Thread.print brings every thread to a safepoint, which on a regionised server with
+            // several hundred threads is a pause the operator should be told about beforehand.
+            "Thread.print", "VM.metaspace", "VM.stringtable", "VM.symboltable",
+            "VM.systemdictionary", "Compiler.codelist", "Compiler.codecache"
     };
 
     private static final int DEFAULT_WATCH_MINUTES = 15;
@@ -156,7 +160,8 @@ public class NativeMemoryModule implements CommandModule {
                 .executor(this::execute)
                 .tabCompleter((platform, sender, arguments) -> TabCompleter.completeForOpts(arguments,
                         "--maps", "--top", "--nmt", "--nmt-baseline", "--nmt-diff", "--trim",
-                        "--flags", "--baseline", "--diff", "--watch", "--dump", "--investigate", "--upload"))
+                        "--flags", "--baseline", "--diff", "--watch", "--dump", "--investigate",
+                        "--diagnose", "--jcmd", "--upload"))
                 .build()
         );
     }
@@ -164,20 +169,22 @@ public class NativeMemoryModule implements CommandModule {
     @Override
     public void close() {
         cancelWatch();
-        if (this.investigationTask != null) {
-            this.investigationTask.cancel(false);
-            this.investigationTask = null;
-        }
-        ScheduledExecutorService executor = this.investigationExecutor;
-        if (executor != null) {
-            executor.shutdownNow();
-            this.investigationExecutor = null;
-        }
+        // Reuse the single implementation rather than repeating it: the copy here omitted clearing
+        // the investigation handle, so the two paths did not leave the same state behind.
+        cancelInvestigation();
     }
 
     private void execute(SparkPlatform platform, CommandSender sender, CommandResponseHandler resp, Arguments arguments) {
-        if (ProcessMemory.getResidentSetSize() < 0) {
-            resp.replyPrefixed(text("Process memory information is only available on Linux.", RED));
+        // Only the /proc-backed views need Linux. jcmd and NMT go through the platform MBean
+        // server and work anywhere, so refusing them here removed working functionality from every
+        // non-Linux server for no reason.
+        boolean procAvailable = ProcessMemory.getResidentSetSize() >= 0;
+        boolean needsProc = !arguments.boolFlag("jcmd")
+                && !arguments.boolFlag("nmt") && !arguments.boolFlag("nmt-baseline")
+                && !arguments.boolFlag("nmt-diff") && !arguments.boolFlag("flags");
+        if (!procAvailable && needsProc) {
+            resp.replyPrefixed(text("This view needs /proc and is only available on Linux.", RED));
+            resp.replyPrefixed(text("--jcmd, --nmt and --flags work on any platform.", GRAY));
             return;
         }
 
