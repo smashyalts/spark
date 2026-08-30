@@ -490,8 +490,15 @@ public final class OffHeapInvestigation {
         } else {
             nmtGrowth = parseNmtTotalDelta(nmtDiff);
             for (String line : nmtDiff.split("\n")) {
-                if (line.contains("+") && (line.trim().startsWith("-") || line.contains("Total:"))) {
-                    out.add("  " + line.trim());
+                String trimmed = line.trim();
+                boolean isCategory = trimmed.startsWith("-") || trimmed.contains("Total:");
+                // A category that SHRANK is a change too, and often the informative one - a
+                // collector releasing metadata while something else grows is exactly the shape
+                // worth seeing. Filtering on "+" alone hid every decrease under a heading that
+                // promised changes.
+                boolean changed = trimmed.contains("+") || trimmed.matches(".*=\\d+[KMG]?B\\s+-\\d+.*");
+                if (isCategory && changed) {
+                    out.add("  " + trimmed);
                 }
             }
             if (nmtGrowth >= 0) {
@@ -507,10 +514,14 @@ public final class OffHeapInvestigation {
         Map<Integer, long[]> before = first.arenas.perArena();
         Map<Integer, long[]> after = last.arenas.perArena();
         List<int[]> ranked = new ArrayList<>();
+        // Kept in bytes alongside the MB display value: rounding to whole megabytes before
+        // comparing against mmap growth biased the comparison toward "mmap dominant".
+        long arenaGrowthExactBytes = 0;
         for (Map.Entry<Integer, long[]> e : after.entrySet()) {
             long[] b = before.get(e.getKey());
             long grew = e.getValue()[0] - (b == null ? 0 : b[0]);
             ranked.add(new int[]{e.getKey(), (int) (grew / (1024 * 1024))});
+            arenaGrowthExactBytes += Math.max(0, grew);
         }
         ranked.sort((x, y) -> Integer.compare(y[1], x[1]));
         long totalArenaGrowthMb = 0;
@@ -532,7 +543,7 @@ public final class OffHeapInvestigation {
         // reporting that as "spread across arenas" would point at a shared subsystem when arenas
         // are not involved at all.
         long mmapGrowth = last.arenas.mmapBytes() - first.arenas.mmapBytes();
-        long arenaGrowthBytes = totalArenaGrowthMb * 1024L * 1024L;
+        long arenaGrowthBytes = arenaGrowthExactBytes;
         if (mmapGrowth > arenaGrowthBytes && mmapGrowth > 64L * 1024 * 1024) {
             out.add(String.format("  Most glibc growth (%s) is mmap-served, NOT in any arena.",
                     FormatUtil.formatBytes(mmapGrowth)));
@@ -618,6 +629,10 @@ public final class OffHeapInvestigation {
         int grewCount = 0;
         long goneBytes = 0;
         int goneCount = 0;
+        // Existing mappings that lost resident pages were previously not counted at all, so the
+        // net figure could claim more growth than the process actually gained.
+        long shrankBytes = 0;
+        int shrankCount = 0;
         int arenaSized = 0;
 
         // value: bytes gained. key: address, plus a marker for mappings that did not exist before.
@@ -638,6 +653,10 @@ public final class OffHeapInvestigation {
                 grewBytes += gained;
                 grewCount++;
                 label = Long.toHexString(e.getKey()) + " (grew, " + FormatUtil.formatBytes(now[1]) + " mapped)";
+            } else if (now[0] < before[0]) {
+                shrankBytes += before[0] - now[0];
+                shrankCount++;
+                continue;
             } else {
                 continue;
             }
@@ -661,10 +680,11 @@ public final class OffHeapInvestigation {
 
         out.add(String.format("  %d new mappings holding %s", newCount, FormatUtil.formatBytes(newBytes)));
         out.add(String.format("  %d existing mappings grew by %s", grewCount, FormatUtil.formatBytes(grewBytes)));
+        out.add(String.format("  %d existing mappings shrank by %s", shrankCount, FormatUtil.formatBytes(shrankBytes)));
         out.add(String.format("  %d mappings disappeared, releasing %s", goneCount, FormatUtil.formatBytes(goneBytes)));
-        out.add(String.format("  net from mappings: %s%s",
-                (newBytes + grewBytes - goneBytes) < 0 ? "-" : "+",
-                FormatUtil.formatBytes(Math.abs(newBytes + grewBytes - goneBytes))));
+        long net = newBytes + grewBytes - goneBytes - shrankBytes;
+        out.add(String.format("  net from mappings: %s%s", net < 0 ? "-" : "+",
+                FormatUtil.formatBytes(Math.abs(net))));
         if (arenaSized > 0) {
             out.add(String.format("  %d of the growing mappings are 64 MiB - the glibc arena subheap signature",
                     arenaSized));
@@ -685,14 +705,20 @@ public final class OffHeapInvestigation {
         // Rate, not absolute size. A fixed byte threshold calls a slow leak "no growth" over a
         // short window and calls normal warm-up a leak over a long one.
         boolean otherLeak = fdGrowth > 0 || classGrowth > 0 || threadGrowth > 0;
-        if (perHour < 64L * 1024 * 1024 && !javaHeapLeak && !otherLeak) {
+        // Resident size can stay flat while native memory grows, if the heap releases as fast as
+        // the leak allocates. Gating solely on RSS would call that "no meaningful leak" on a
+        // process that is steadily losing memory to something outside the JVM.
+        double unaccountedPerHour = unaccountedGrowth / hours;
+        boolean nativeGrowing = unaccountedPerHour > 64L * 1024 * 1024;
+        if (perHour < 64L * 1024 * 1024 && !nativeGrowing && !javaHeapLeak && !otherLeak) {
             out.add(String.format("  Growing at only %s/hour - no meaningful leak in this window.",
-                    FormatUtil.formatBytes((long) Math.max(0, perHour))));
+                    signed((long) perHour)));
             out.add("  Either there is nothing wrong, or the window was too quiet. Re-run under load.");
             return;
         }
 
-        out.add(String.format("  Growing at %s/hour.", FormatUtil.formatBytes((long) perHour)));
+        out.add(String.format("  Resident growing at %s/hour, unaccounted at %s/hour.",
+                signed((long) perHour), signed((long) unaccountedPerHour)));
 
         // Reported first and unconditionally: a rising post-GC floor is the most actionable
         // finding available, and only the verdict is echoed to chat - a Java leak buried in the
