@@ -570,7 +570,8 @@ public final class OffHeapInvestigation {
         out.add("--- VERDICT ---");
         appendVerdict(out, rssGrowth, unaccountedGrowth, arenaGrowth, nmtGrowth, heapGrowth,
                 javaHeapLeak, floorRise, last, hours,
-                fdLeak ? fdGrowth : 0, classLeak ? classGrowth : 0, threadLeak ? threadGrowth : 0);
+                fdLeak ? fdGrowth : 0, classLeak ? classGrowth : 0, threadLeak ? threadGrowth : 0,
+                unaccountedUsable);
         return out;
     }
 
@@ -699,7 +700,8 @@ public final class OffHeapInvestigation {
     private void appendVerdict(List<String> out, long rssGrowth, long unaccountedGrowth,
                                long arenaGrowth, long nmtGrowth, long heapGrowth,
                                boolean javaHeapLeak, long floorRise, Sample last, double hours,
-                               long fdGrowth, long classGrowth, int threadGrowth) {
+                               long fdGrowth, long classGrowth, int threadGrowth,
+                               boolean unaccountedUsable) {
         double perHour = rssGrowth / hours;
 
         // Rate, not absolute size. A fixed byte threshold calls a slow leak "no growth" over a
@@ -720,9 +722,9 @@ public final class OffHeapInvestigation {
         out.add(String.format("  Resident growing at %s/hour, unaccounted at %s/hour.",
                 signed((long) perHour), signed((long) unaccountedPerHour)));
 
-        // Reported first and unconditionally: a rising post-GC floor is the most actionable
-        // finding available, and only the verdict is echoed to chat - a Java leak buried in the
-        // trend section above would never be seen by anyone who did not open the file.
+        // All four leak classes are reported before the off-heap reasoning below: only the verdict
+        // is echoed to chat, so anything omitted here is invisible to a reader who does not open
+        // the report file.
         if (fdGrowth > 0) {
             out.add("  FILE DESCRIPTOR LEAK: +" + fdGrowth + " open descriptors. This kills the");
             out.add("  server at the ulimit regardless of how much memory is free.");
@@ -749,7 +751,10 @@ public final class OffHeapInvestigation {
         boolean glibcExplains = arenaGrowth > 0 && unaccountedGrowth > 0
                 && arenaGrowth * 2 > unaccountedGrowth;
 
-        if (unaccountedGrowth <= 0) {
+        if (!unaccountedUsable) {
+            out.add("  RSS could not be read, so nothing can be said about off-heap growth. The");
+            out.add("  Java-side findings above still stand; the native side is simply unmeasured.");
+        } else if (unaccountedGrowth <= 0) {
             out.add("  All of the growth is accounted for by the JVM's own regions - heap, code,");
             out.add("  metaspace or direct buffers. Nothing is leaking outside the JVM's view.");
             if (heapGrowth > 0) {

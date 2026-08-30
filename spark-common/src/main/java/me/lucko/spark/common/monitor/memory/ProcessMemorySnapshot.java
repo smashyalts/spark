@@ -269,8 +269,8 @@ public final class ProcessMemorySnapshot {
     public SparkSamplerProtos.ProcessMemoryData toProto() {
         SparkSamplerProtos.ProcessMemoryData.Builder proto = SparkSamplerProtos.ProcessMemoryData.newBuilder()
                 .setTimestamp(this.timestamp)
-                .setRss(this.rss)
-                .setSwap(this.swap)
+                .setRss(Math.max(0, this.rss))
+                .setSwap(Math.max(0, this.swap))
                 .setHeapUsed(this.heapUsed)
                 .setHeapCommitted(this.heapCommitted)
                 .setHeapMax(this.heapMax)
@@ -278,13 +278,18 @@ public final class ProcessMemorySnapshot {
                 .setNioDirectUsed(this.directUsed)
                 .setNioDirectCount(this.directCount)
                 .setNioMappedUsed(this.mappedUsed)
-                .setNettyDirect(this.nettyDirect)
-                .setNettyMaxDirect(this.nettyMaxDirect)
+                // -1 means "could not measure", not "zero bytes". Clamping keeps a consumer from
+                // charting minus one byte of Netty memory; has_netty_direct is implied by > 0.
+                .setNettyDirect(Math.max(0, this.nettyDirect))
+                .setNettyMaxDirect(Math.max(0, this.nettyMaxDirect))
                 .setThreads(this.threads)
                 .setPeakThreads(this.peakThreads)
                 .setThreadStackSize(this.threadStackSize)
                 .setLoadedClasses(this.loadedClasses)
-                .setUnaccounted(unaccounted())
+                // 0 rather than the Long.MIN_VALUE sentinel: the proto has no way to express
+                // "unavailable", and shipping the sentinel means every consumer - the viewer, the
+                // analysis scripts - reads it as a real measurement of -9.2 exabytes.
+                .setUnaccounted(unaccounted() == Long.MIN_VALUE ? 0 : unaccounted())
                 .setAlwaysPreTouch(this.alwaysPreTouch)
                 .setAvailableProcessors(this.availableProcessors)
                 .setNmtEnabled(this.nmtEnabled);
