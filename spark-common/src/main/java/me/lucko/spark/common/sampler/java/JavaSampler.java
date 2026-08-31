@@ -211,7 +211,7 @@ public class JavaSampler extends AbstractSampler implements Runnable {
         proto.setExtendedContents(SparkSamplerProtos.ExtendedProfileContents.newBuilder()
                 .setHasExecution(true)
                 .setHasProcessMemory(capturedMemory)
-                .setForkVersion(me.lucko.spark.common.sampler.async.AsyncSampler.FORK_VERSION)
+                .setForkVersion(me.lucko.spark.common.sampler.async.AsyncSampler.forkVersion(platform))
                 .build());
 
         return proto.build();

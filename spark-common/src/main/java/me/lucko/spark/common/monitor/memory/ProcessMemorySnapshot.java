@@ -55,7 +55,16 @@ public final class ProcessMemorySnapshot {
     /** Mappings included in an export. Enough to identify a pattern, small enough to upload. */
     private static final int MAX_EXPORTED_MAPPINGS = 64;
 
+    // Monotonic, matching the sampler. This is the field that gets compared - against
+    // metadata.start_time in the proto, and against another snapshot's for the --diff elapsed
+    // time - and the sampler moved to TimeUtil precisely so those comparisons survive a clock
+    // adjustment. Reading it from System.currentTimeMillis() while start_time came from the
+    // monotonic source made the two incomparable: an 18 second recording appeared to span 20
+    // minutes purely because of the offset between the clocks.
     private long timestamp;
+    // Wall clock, for the human-readable date in report headers and history rows only. Never
+    // subtract this from anything.
+    private long wallTimestamp;
     private long rss = -1;
     private long swap = -1;
     private Map<String, Long> smapsRollup = new LinkedHashMap<>();
@@ -102,7 +111,8 @@ public final class ProcessMemorySnapshot {
 
     public static ProcessMemorySnapshot capture(boolean includeMappings, boolean includeNmt) {
         ProcessMemorySnapshot s = new ProcessMemorySnapshot();
-        s.timestamp = System.currentTimeMillis();
+        s.timestamp = me.lucko.spark.common.util.TimeUtil.monotonicCurrentTimeMillis();
+        s.wallTimestamp = System.currentTimeMillis();
 
         s.rss = ProcessMemory.getResidentSetSize();
         s.swap = ProcessMemory.getSwapUsage();
@@ -405,8 +415,14 @@ public final class ProcessMemorySnapshot {
         return this.loadedClasses;
     }
 
+    /** Monotonic. Use for elapsed time and for correlating with the sampler. */
     public long timestamp() {
         return this.timestamp;
+    }
+
+    /** Wall clock. Use for display only. */
+    public long wallTimestamp() {
+        return this.wallTimestamp;
     }
 
     public Map<String, Long> cgroup() {

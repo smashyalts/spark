@@ -59,7 +59,25 @@ import java.util.logging.Level;
 public class AsyncSampler extends AbstractSampler {
 
     /** fork - version stamped into every profile so a reader knows which build produced it */
-    public static final String FORK_VERSION = "spark-nativemem-1.0";
+    /**
+     * Prefix identifying this fork's profile format. Stable - consumers detect the fork by it.
+     */
+    public static final String FORK_VERSION_PREFIX = "spark-nativemem-1.0";
+
+    /**
+     * Fork format, plus the build that produced the profile.
+     *
+     * <p>The build matters when triaging a profile that looks wrong. A bare format version
+     * cannot answer "does this capture predate the fix", which is the first question asked of
+     * any profile that reports something implausible - and answering it otherwise means
+     * guessing from upload timestamps.</p>
+     */
+    public static String forkVersion(SparkPlatform platform) {
+        String pluginVersion = platform == null ? null : platform.getPlugin().getVersion();
+        return pluginVersion == null || pluginVersion.isEmpty()
+                ? FORK_VERSION_PREFIX
+                : FORK_VERSION_PREFIX + "/" + pluginVersion;
+    }
 
     /** Function to collect and measure samples - either execution or allocation */
     private final SampleCollector<?> sampleCollector;
@@ -371,7 +389,7 @@ public class AsyncSampler extends AbstractSampler {
         SparkSamplerProtos.ExtendedProfileContents.Builder contents = SparkSamplerProtos.ExtendedProfileContents.newBuilder()
                 .setHasExecution(this.sampleCollector instanceof SampleCollector.Execution)
                 .setLeakTailRatio(AsyncProfilerJob.LEAK_TAIL_RATIO)
-                .setForkVersion(FORK_VERSION);
+                .setForkVersion(forkVersion(this.platform));
 
         // Measured to when the sampler actually stopped, not to when the profile happens to be
         // exported: a leak total is read as a rate, and a profile exported minutes after the fact

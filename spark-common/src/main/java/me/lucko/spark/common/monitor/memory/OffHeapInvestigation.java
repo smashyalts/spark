@@ -381,7 +381,17 @@ public final class OffHeapInvestigation {
             if (anon != null && anon > 0) {
                 long realStacks = nmtThreadCommitted >= 0 ? nmtThreadCommitted
                         : (long) last.threads * stackSizeOf(last);
-                long viaAnon = anon - last.process.nonHeapCommitted() - last.process.directUsed() - realStacks;
+                // The Java heap is anonymous memory too, so it has to come out of Pss_Anon as
+                // well. Omitting it left the cross-check high by the whole resident heap - on a
+                // 7 GB heap it reported 9.0 GB against a true figure of 1.8 GB and then fired the
+                // disagreement warning, telling the reader to distrust a number that was right.
+                //
+                // Committed rather than resident, because resident-per-region is not available
+                // here; without AlwaysPreTouch the heap is committed ahead of being faulted in,
+                // so this can undershoot, which is why the comparison below is a tolerance check
+                // rather than an equality.
+                long viaAnon = anon - last.process.heapCommitted() - last.process.nonHeapCommitted()
+                        - last.process.directUsed() - realStacks;
                 out.add(String.format("    cross-check via Pss_Anon: %s", signed(viaAnon)));
                 long diff = Math.abs(viaAnon - correctedUnaccounted);
                 if (correctedUnaccounted > 0 && diff > correctedUnaccounted / 10) {

@@ -697,7 +697,7 @@ public class NativeMemoryModule implements CommandModule {
                         .setHasExecution(false)
                         .setHasProcessMemory(true)
                         .setMemoryAccountingOnly(true)
-                        .setForkVersion(AsyncSampler.FORK_VERSION)
+                        .setForkVersion(AsyncSampler.forkVersion(platform))
                         .build())
                 .build();
 
@@ -854,7 +854,7 @@ public class NativeMemoryModule implements CommandModule {
                         .append("threads,classes,unaccounted,cgroup_current\n");
             }
             Long cgroupCurrent = s.cgroup().get("memory.current");
-            sb.append(ISO.format(Instant.ofEpochMilli(s.timestamp()))).append(',')
+            sb.append(ISO.format(Instant.ofEpochMilli(s.wallTimestamp()))).append(',')
                     .append(s.rss()).append(',')
                     .append(s.heapUsed()).append(',')
                     .append(s.heapCommitted()).append(',')
@@ -1211,7 +1211,7 @@ public class NativeMemoryModule implements CommandModule {
         ProcessMemorySnapshot s = ProcessMemorySnapshot.capture();
         StringBuilder sb = new StringBuilder();
 
-        sb.append("spark off-heap memory report - ").append(ISO.format(Instant.ofEpochMilli(s.timestamp()))).append('\n');
+        sb.append("spark off-heap memory report - ").append(ISO.format(Instant.ofEpochMilli(s.wallTimestamp()))).append('\n');
         sb.append("JVM: ").append(System.getProperty("java.vm.name")).append(' ')
                 .append(System.getProperty("java.version")).append('\n');
         sb.append("Uptime: ")
