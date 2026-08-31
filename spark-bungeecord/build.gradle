@@ -11,6 +11,14 @@ dependencies {
 }
 
 processResources {
+    // Declared as task inputs. Gradle does not track the values passed to expand(), so
+    // processResources stays UP-TO-DATE when only the version changes - while shadowJar's
+    // archiveFileName, which IS tracked, updates. An incremental build then produces a jar named
+    // for the new version whose plugin descriptor still declares the old one, and spark stamps
+    // that descriptor's version into every profile it exports.
+    inputs.property 'pluginVersion', project.pluginVersion
+    inputs.property 'pluginDescription', project.pluginDescription
+
     from(sourceSets.main.resources.srcDirs) {
         expand (
                 'pluginVersion': project.pluginVersion,
