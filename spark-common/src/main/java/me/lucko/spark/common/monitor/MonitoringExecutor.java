@@ -32,12 +32,23 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 public enum MonitoringExecutor {
     ;
 
-    /** The executor used to monitor & calculate rolling averages. */
+    /**
+     * The executor used to monitor & calculate rolling averages.
+     *
+     * <p>Several threads rather than one. ScheduledThreadPoolExecutor still never runs the same
+     * periodic task concurrently with itself, so each polling task keeps its own state safely;
+     * the shared state the tasks write to - {@link me.lucko.spark.common.util.RollingAverage} and
+     * {@link me.lucko.spark.common.util.MetricSeries} - is internally locked.</p>
+     */
     public static final ScheduledExecutorService INSTANCE = new SparkScheduledThreadPoolExecutor(4, new SparkThreadFactory("spark-monitoring", true));
 
     public static ScheduledFuture<?> scheduleAtFixedRateMillis(Runnable command, long periodMillis) {
         // schedule the task with a random initial delay to avoid all fixed rate tasks running at the same time
-        long delay = ThreadLocalRandom.current().nextLong(Math.min(periodMillis, 10_000L));
+        //
+        // the bound is clamped to at least 1: nextLong throws for a bound that is not positive,
+        // and both callers schedule from a static initializer, where that would surface as an
+        // ExceptionInInitializerError naming the random call rather than the caller
+        long delay = ThreadLocalRandom.current().nextLong(Math.max(1L, Math.min(periodMillis, 10_000L)));
         return INSTANCE.scheduleAtFixedRate(command, delay, periodMillis, MILLISECONDS);
     }
 

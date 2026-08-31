@@ -136,7 +136,6 @@ public final class GlibcArenaInfo {
         return this.available;
     }
 
-    /** Fraction of glibc's held memory that is free - the fragmentation signal. */
     /** Free fraction of ARENA memory only. mmap-served blocks have no free concept. */
     public double arenaFreeRatio() {
         return this.systemBytes == 0 ? 0 : (double) this.freeBytes / this.systemBytes;

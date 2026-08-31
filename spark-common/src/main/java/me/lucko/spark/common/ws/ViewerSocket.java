@@ -54,10 +54,15 @@ public abstract class ViewerSocket implements ViewerSocketConnection.Listener, A
     /** The underlying connection */
     protected final ViewerSocketConnection socket;
 
-    private boolean closed = false;
+    // volatile: pings arrive on the websocket listener thread while checkShouldClose() and
+    // close() run on whichever thread drives this socket - the sampler's for a profile, a
+    // dedicated scheduler for a health report. A reader that never observes a ping either closes
+    // a live socket with "no clients have pinged for 30s", or reads lastPing as 0 forever and
+    // sends the viewer nothing at all.
+    private volatile boolean closed = false;
     private final long socketOpenTime = TimeUtil.monotonicCurrentTimeMillis();
-    private long lastPing = 0;
-    private String lastPayloadId = null;
+    private volatile long lastPing = 0;
+    private volatile String lastPayloadId = null;
 
     protected ViewerSocket(SparkPlatform platform, BytesocksClient client) throws Exception {
         this.platform = platform;
@@ -110,12 +115,19 @@ public abstract class ViewerSocket implements ViewerSocketConnection.Listener, A
 
     @Override
     public void close() {
+        // Set first, and return early if it was already set. Closing twice sent a second pong
+        // over an already-closed connection, and leaving the flag until after the two IO calls
+        // meant isOpen() kept answering true throughout them.
+        if (this.closed) {
+            return;
+        }
+        this.closed = true;
+
         this.socket.sendPacket(builder -> builder.setServerPong(ServerPong.newBuilder()
                 .setOk(false)
                 .build()
         ));
         this.socket.close();
-        this.closed = true;
     }
 
     public String getLastPayloadId() {

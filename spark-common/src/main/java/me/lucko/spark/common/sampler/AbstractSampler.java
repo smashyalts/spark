@@ -158,7 +158,7 @@ public abstract class AbstractSampler implements Sampler {
         this.endTime = TimeUtil.monotonicCurrentTimeMillis();
         this.windowStatisticsCollector.stop();
         for (SamplerViewerSocket viewerSocket : this.viewerSockets) {
-            viewerSocket.processSamplerStopped(this);
+            viewerSocket.processSamplerStopped();
         }
     }
 

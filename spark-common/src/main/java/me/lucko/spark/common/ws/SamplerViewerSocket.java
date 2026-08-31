@@ -24,6 +24,7 @@ import me.lucko.bytesocks.client.BytesocksClient;
 import me.lucko.spark.common.SparkPlatform;
 import me.lucko.spark.common.sampler.AbstractSampler;
 import me.lucko.spark.common.sampler.Sampler;
+
 import me.lucko.spark.common.util.MediaTypes;
 import me.lucko.spark.proto.SparkSamplerProtos;
 import me.lucko.spark.proto.SparkWebSocketProtos;
@@ -62,16 +63,8 @@ public class SamplerViewerSocket extends ViewerSocket {
         }
     }
 
-    /**
-     * Called when the sampler stops.
-     *
-     * @param sampler the sampler
-     */
-    public void processSamplerStopped(AbstractSampler sampler) {
-        if (isClosed()) {
-            return;
-        }
-
+    /** Called when the sampler stops. */
+    public void processSamplerStopped() {
         close();
     }
 

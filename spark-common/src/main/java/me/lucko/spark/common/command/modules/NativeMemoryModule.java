@@ -121,9 +121,16 @@ public class NativeMemoryModule implements CommandModule {
     /** Headroom left free when writing a report. */
     private static final long MIN_FREE_DISK_BYTES = 64L * 1024 * 1024;
 
+    // volatile: --baseline and --diff can run from different command threads (console and in
+    // game are not the same thread), so an unsynchronised handoff can publish the snapshot
+    // half-built or not at all
     /** Retained between invocations so --diff has something to compare against. */
-    private ProcessMemorySnapshot baseline;
-    private ScheduledFuture<?> watchTask;
+    private volatile ProcessMemorySnapshot baseline;
+    // volatile: cleared by cancelWatch() from a command thread AND from the MonitoringExecutor
+    // thread, when appendHistory finds the history file has hit its size cap. Read stale, a
+    // command thread either cancels a dead task and overwrites a live handle - leaving two tasks
+    // appending to one file - or fails to cancel the live one at all.
+    private volatile ScheduledFuture<?> watchTask;
     /**
      * Dedicated thread for the investigation.
      *
@@ -1040,7 +1047,14 @@ public class NativeMemoryModule implements CommandModule {
                 platform.getPlugin().log(Level.WARNING, "Investigation report failed", t);
             } finally {
                 executor.shutdown();
-                this.investigationExecutor = null;
+                // Only clear the field if it still refers to THIS run. Writing the report takes
+                // long enough on a large process that a new investigation can be started in the
+                // meantime, and clearing its handle would leave cancelInvestigation() with
+                // nothing to shut down - the new scheduler thread would then outlive every
+                // cancel attempt.
+                if (this.investigationExecutor == executor) {
+                    this.investigationExecutor = null;
+                }
             }
         }, minutes, TimeUnit.MINUTES);
     }
@@ -1064,14 +1078,44 @@ public class NativeMemoryModule implements CommandModule {
         try {
             Path directory = platform.getPlugin().getPluginDirectory();
             Files.createDirectories(directory);
+
+            byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
+
+            // The same free space guard the interactive path applies, and this is the path that
+            // needs it more: it runs unattended for up to twelve hours on a server already being
+            // diagnosed for a resource problem, next to an incremental log that has been growing
+            // for the whole run.
+            long usable = directory.toFile().getUsableSpace();
+            if (usable > 0 && usable < bytes.length + MIN_FREE_DISK_BYTES) {
+                platform.getPlugin().log(Level.WARNING, "Not writing the investigation report: only "
+                        + FormatUtil.formatBytes(usable) + " of disk space is free.");
+                return java.nio.file.Paths.get("(not written - disk full)");
+            }
+
             pruneOldReports(directory, "investigation");
-            Path file = directory.resolve("investigation-" + FILE_STAMP.format(Instant.now()) + ".txt");
-            Files.write(file, content.getBytes(StandardCharsets.UTF_8));
+            Path file = uniqueReportFile(directory, "investigation");
+            Files.write(file, bytes);
             return file;
         } catch (Throwable t) {
             platform.getPlugin().log(Level.WARNING, "Unable to write investigation report", t);
             return java.nio.file.Paths.get("(write failed)"); // Path.of is Java 11; this module targets 8
         }
+    }
+
+    /**
+     * Resolves a report path that nothing already holds.
+     *
+     * <p>{@link #FILE_STAMP} has one second resolution and {@link Files#write} truncates, so two
+     * reports written in the same second silently became one - while both replies said the file
+     * had been written.</p>
+     */
+    private static Path uniqueReportFile(Path directory, String prefix) {
+        String stamp = FILE_STAMP.format(Instant.now());
+        Path file = directory.resolve(prefix + "-" + stamp + ".txt");
+        for (int i = 2; Files.exists(file) && i < 100; i++) {
+            file = directory.resolve(prefix + "-" + stamp + "-" + i + ".txt");
+        }
+        return file;
     }
 
     private void writeDump(SparkPlatform platform, CommandResponseHandler resp) {
@@ -1151,7 +1195,7 @@ public class NativeMemoryModule implements CommandModule {
 
             pruneOldReports(directory, prefix);
 
-            Path file = directory.resolve(prefix + "-" + FILE_STAMP.format(Instant.now()) + ".txt");
+            Path file = uniqueReportFile(directory, prefix);
             Files.write(file, bytes);
             resp.replyPrefixed(text("Written to: ", GREEN).append(text(file.toString(), GRAY)));
         } catch (Throwable t) {

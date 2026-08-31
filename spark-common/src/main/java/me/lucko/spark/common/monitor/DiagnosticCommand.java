@@ -49,6 +49,9 @@ public enum DiagnosticCommand {
     /** Prefix used on the return value when a command could not be run at all. */
     public static final String UNAVAILABLE = "unavailable: ";
 
+    /** Cached answer for {@link #isNativeMemoryTrackingEnabled()}; null until known. */
+    private static volatile Boolean nmtEnabled;
+
     /** Converts a jcmd command name to its MBean operation name. */
     public static String operationName(String command) {
         StringBuilder sb = new StringBuilder(command.length());
@@ -122,8 +125,6 @@ public enum DiagnosticCommand {
         return cached;
     }
 
-    private static volatile Boolean nmtEnabled;
-
     /**
      * Committed bytes for one NMT category, or -1 if unavailable.
      *
@@ -134,6 +135,13 @@ public enum DiagnosticCommand {
      * everything unattributed look correspondingly smaller.</p>
      */
     public static long getNmtCommitted(String category) {
+        // Ask the cached answer first. A full summary walk is the expensive part of this class -
+        // it is why isNativeMemoryTrackingEnabled caches - and on a JVM started without NMT every
+        // call here paid for one only to read the JVM's refusal message out of the result.
+        if (!isNativeMemoryTrackingEnabled()) {
+            return -1;
+        }
+
         String summary = execute("VM.native_memory", "summary");
         if (summary.startsWith(UNAVAILABLE) || summary.contains("not enabled")) {
             return -1;
@@ -141,7 +149,7 @@ public enum DiagnosticCommand {
         // Match the category at the START of the entry, not anywhere in the line. A substring
         // test lets "Class" match a line describing something else that merely mentions it, and
         // the first hit wins - so the wrong figure is returned with no indication anything is off.
-        String needle = "-" ;
+        String needle = "-";
         for (String line : summary.split("\n")) {
             String trimmed = line.trim();
             if (!trimmed.startsWith(needle)) {

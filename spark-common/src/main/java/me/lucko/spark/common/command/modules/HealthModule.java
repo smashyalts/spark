@@ -273,6 +273,7 @@ public class HealthModule implements CommandModule {
             try {
                 HealthReportViewerSocket socket = new HealthReportViewerSocket(platform, bytesocksClient);
                 data.setChannelInfo(socket.getPayload());
+                socket.start();
             } catch (Exception e) {
                 resp.replyPrefixed(text("An error occurred whilst opening the live viewer connection.", RED));
                 platform.getPlugin().log(Level.WARNING, "Error whilst opening live viewer connection", e);

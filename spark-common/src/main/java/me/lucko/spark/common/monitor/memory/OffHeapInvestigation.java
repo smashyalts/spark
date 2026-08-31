@@ -22,6 +22,7 @@ package me.lucko.spark.common.monitor.memory;
 
 import me.lucko.spark.common.monitor.DiagnosticCommand;
 import me.lucko.spark.common.util.FormatUtil;
+import me.lucko.spark.common.util.TimeUtil;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -133,10 +134,14 @@ public final class OffHeapInvestigation {
 
     private void record(Sample sample) {
         this.samples.add(sample);
-        appendIncremental(sample);
+        // The header is emitted by whichever call actually produced the first row. Re-reading
+        // samples.size() inside appendIncremental raced: begin() runs on the command thread while
+        // the sampling task runs on the investigation scheduler, so two callers could each see a
+        // size of 1 and write a header, or the winner could see 2 and write none.
+        appendIncremental(sample, this.samples.size() == 1);
     }
 
-    private void appendIncremental(Sample sample) {
+    private void appendIncremental(Sample sample, boolean writeHeader) {
         if (this.incrementalLog == null) {
             return;
         }
@@ -150,7 +155,7 @@ public final class OffHeapInvestigation {
             }
 
             StringBuilder sb = new StringBuilder();
-            if (this.samples.size() == 1) {
+            if (writeHeader) {
                 sb.append("time,rss,heap_used,heap_committed,non_heap,nio_direct,")
                         .append("glibc_held,glibc_free,arenas,subheaps,unaccounted,")
                         .append("open_fds,loaded_classes,unloaded_classes,threads,gc_count,gc_time_ms\n");
@@ -230,14 +235,26 @@ public final class OffHeapInvestigation {
         long gcTime = 0;
         for (java.lang.management.GarbageCollectorMXBean gc :
                 java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()) {
-            if (gc.getCollectionCount() > 0) {
-                gcCount += gc.getCollectionCount();
+            // Read once each: the bean was queried twice per counter, so the value accumulated
+            // was not the value tested - a collection completing between the two reads is counted
+            // under a guard that examined a different number. The guard excludes the -1
+            // unavailable sentinel.
+            long count = gc.getCollectionCount();
+            if (count > 0) {
+                gcCount += count;
             }
-            if (gc.getCollectionTime() > 0) {
-                gcTime += gc.getCollectionTime();
+            long time = gc.getCollectionTime();
+            if (time > 0) {
+                gcTime += time;
             }
         }
-        return new Sample(System.currentTimeMillis(), ProcessMemorySnapshot.capture(),
+        // Monotonic, not wall clock. Every figure this command produces is a rate over elapsed
+        // time across a window of up to twelve hours, which makes it the measurement in this
+        // codebase most exposed to an NTP correction: a step backwards makes the window shrink or
+        // go negative, report() then clamps it to one second, and every per-hour rate, the
+        // descriptor exhaustion projection and the verdict's rate gates inflate by orders of
+        // magnitude.
+        return new Sample(TimeUtil.monotonicCurrentTimeMillis(), ProcessMemorySnapshot.capture(),
                 GlibcArenaInfo.capture(), mappings, mappingPaths,
                 ProcessMemory.getOpenFileDescriptors(),
                 classes.getLoadedClassCount(), classes.getUnloadedClassCount(),
@@ -337,6 +354,12 @@ public final class OffHeapInvestigation {
             if (stackCorrection > 0) {
                 out.add(String.format("    thread stacks over-counted by %s (estimate vs NMT actual)",
                         FormatUtil.formatBytes(stackCorrection)));
+            } else if (stackCorrection < 0) {
+                // Disclosed in both directions. The correction is applied to the TRUE figure
+                // either way, and printing it only when positive left the reader with an adjusted
+                // number and no way to see what adjusted it.
+                out.add(String.format("    thread stacks under-counted by %s (estimate vs NMT actual)",
+                        FormatUtil.formatBytes(-stackCorrection)));
             }
             if (fileBacked > 0) {
                 out.add(String.format("    file-backed resident (jars, .so, mapped files): %s - not a leak",
@@ -407,7 +430,7 @@ public final class OffHeapInvestigation {
         // unambiguous, and the floor rising at all over hours is already the signal.
         boolean javaHeapLeak = this.samples.size() >= 4
                 && firstHalfFloor != Long.MAX_VALUE && secondHalfFloor != Long.MAX_VALUE
-                && floorRise > 64L * 1024 * 1024 * Math.max(1, (long) Math.ceil(hours));
+                && floorRise > 64L * 1024 * 1024 * Math.max(1.0, hours);
         if (javaHeapLeak) {
             out.add("  The post-GC FLOOR rose by " + FormatUtil.formatBytes(floorRise)
                     + " - that is a Java object leak.");
@@ -489,7 +512,10 @@ public final class OffHeapInvestigation {
         // NMT diff is the discriminator between "the JVM did this" and "something else did".
         String nmtDiff = this.nmtBaselineOk
                 ? DiagnosticCommand.execute("VM.native_memory", "summary.diff", "scale=MB") : "";
-        long nmtGrowth = -1;
+        // Long.MIN_VALUE, not -1: the delta is signed, so -1 is a legal measurement and using it
+        // as the unavailable sentinel folds an NMT total that SHRANK into the same branch as one
+        // that could not be read.
+        long nmtGrowth = Long.MIN_VALUE;
         out.add("--- NMT categories that changed ---");
         if (!this.nmtBaselineOk) {
             out.add("  NMT baseline was not set at the start of this run, so a diff here would");
@@ -513,8 +539,8 @@ public final class OffHeapInvestigation {
                     out.add("  " + trimmed);
                 }
             }
-            if (nmtGrowth >= 0) {
-                out.add(String.format("  NMT total committed delta: %s", FormatUtil.formatBytes(nmtGrowth)));
+            if (nmtGrowth != Long.MIN_VALUE) {
+                out.add(String.format("  NMT total committed delta: %s", signed(nmtGrowth)));
             }
         }
         out.add("");
@@ -525,39 +551,39 @@ public final class OffHeapInvestigation {
         out.add("--- Per-arena growth (glibc binds threads to arenas) ---");
         Map<Integer, long[]> before = first.arenas.perArena();
         Map<Integer, long[]> after = last.arenas.perArena();
-        List<int[]> ranked = new ArrayList<>();
-        // Kept in bytes alongside the MB display value: rounding to whole megabytes before
-        // comparing against mmap growth biased the comparison toward "mmap dominant".
+        // Bytes throughout, one total. The shares below were previously computed from values
+        // rounded to whole megabytes while the mmap comparison used exact bytes, so the section
+        // carried two different totals for the same quantity - and every arena that grew by under
+        // a megabyte rounded to zero, vanishing from the listing while still counting toward the
+        // figure the mmap comparison used.
+        List<long[]> ranked = new ArrayList<>();
         long arenaGrowthExactBytes = 0;
         for (Map.Entry<Integer, long[]> e : after.entrySet()) {
             long[] b = before.get(e.getKey());
             long grew = e.getValue()[0] - (b == null ? 0 : b[0]);
-            ranked.add(new int[]{e.getKey(), (int) (grew / (1024 * 1024))});
+            ranked.add(new long[]{e.getKey(), grew});
             arenaGrowthExactBytes += Math.max(0, grew);
         }
-        ranked.sort((x, y) -> Integer.compare(y[1], x[1]));
-        long totalArenaGrowthMb = 0;
-        for (int[] r : ranked) {
-            totalArenaGrowthMb += Math.max(0, r[1]);
-        }
+        ranked.sort((x, y) -> Long.compare(y[1], x[1]));
         int shown = 0;
         int grewCountArenas = 0;
         for (int i = 0; i < ranked.size() && shown < 8; i++) {
-            int nr = ranked.get(i)[0];
-            int mb = ranked.get(i)[1];
-            // Skip arenas that did not grow. Eight rows of "+0 bytes (0% of growth)" is noise that
+            int nr = (int) ranked.get(i)[0];
+            long grew = ranked.get(i)[1];
+            // Skip arenas that did not move. Eight rows of "+0 bytes (0% of growth)" is noise that
             // buries the one arena that did.
-            if (mb == 0) {
+            if (grew == 0) {
                 continue;
             }
-            if (mb > 0) {
+            if (grew > 0) {
                 grewCountArenas++;
             }
             shown++;
             long[] cur = after.get(nr);
-            double pct = totalArenaGrowthMb > 0 ? (100.0 * Math.max(0, mb) / totalArenaGrowthMb) : 0;
+            double pct = arenaGrowthExactBytes > 0
+                    ? (100.0 * Math.max(0, grew) / arenaGrowthExactBytes) : 0;
             out.add(String.format("  arena %-3d  %-9s (%4.0f%% of growth)  now %s, %.0f%% free, %d subheaps",
-                    nr, (mb < 0 ? "-" : "+") + FormatUtil.formatBytes(Math.abs(mb) * 1024L * 1024L), pct,
+                    nr, (grew < 0 ? "-" : "+") + FormatUtil.formatBytes(Math.abs(grew)), pct,
                     FormatUtil.formatBytes(cur[0]),
                     cur[0] > 0 ? (100.0 * cur[1] / cur[0]) : 0, cur[2]));
         }
@@ -569,18 +595,17 @@ public final class OffHeapInvestigation {
             out.add("  No arena grew over this window.");
         }
         long mmapGrowth = last.arenas.mmapBytes() - first.arenas.mmapBytes();
-        long arenaGrowthBytes = arenaGrowthExactBytes;
-        if (mmapGrowth > arenaGrowthBytes && mmapGrowth > 64L * 1024 * 1024) {
+        if (mmapGrowth > arenaGrowthExactBytes && mmapGrowth > 64L * 1024 * 1024) {
             out.add(String.format("  Most glibc growth (%s) is mmap-served, NOT in any arena.",
                     FormatUtil.formatBytes(mmapGrowth)));
             out.add("  These are large single allocations above the mmap threshold, freed with");
             out.add("  munmap rather than returned to an arena - so retention here means genuinely");
             out.add("  live blocks, and the per-arena split below cannot attribute them.");
-        } else if (!ranked.isEmpty() && totalArenaGrowthMb > 0) {
-            double topShare = 100.0 * Math.max(0, ranked.get(0)[1]) / totalArenaGrowthMb;
+        } else if (!ranked.isEmpty() && arenaGrowthExactBytes > 0) {
+            double topShare = 100.0 * Math.max(0, ranked.get(0)[1]) / arenaGrowthExactBytes;
             if (topShare > 60) {
                 out.add(String.format("  Growth is CONCENTRATED in arena %d (%.0f%%). The leak belongs to the",
-                        ranked.get(0)[0], topShare));
+                        (int) ranked.get(0)[0], topShare));
                 out.add("  few threads bound to that arena, not to the process at large.");
             } else {
                 out.add("  Growth is SPREAD across arenas - many threads allocate and retain, which");
@@ -665,7 +690,11 @@ public final class OffHeapInvestigation {
             int slash = path.lastIndexOf('/');
             return Long.toHexString(address) + " " + (slash >= 0 ? path.substring(slash + 1) : path);
         }
-        long heap = sample.process.heapCommitted();
+        // heapMax, not heapCommitted: the JVM reserves the heap mapping at -Xmx up front and
+        // commits into it, so on the common -Xms1g -Xmx8g the mapping is 8 GB while committed is
+        // 1 GB - a ratio of 8, far outside the window below, and the label this method exists to
+        // apply never fires. Falls back to committed when max is unavailable (-1).
+        long heap = sample.process.heapMax() > 0 ? sample.process.heapMax() : sample.process.heapCommitted();
         if (heap > 0 && mappedSize > 0) {
             double ratio = (double) mappedSize / heap;
             if (ratio > 0.6 && ratio < 1.6) {
@@ -801,7 +830,10 @@ public final class OffHeapInvestigation {
         // NMT's total includes Java heap commitment, which grows for entirely healthy reasons.
         // Comparing the raw total against RSS growth lets an expanding heap mask a native leak
         // underneath it, so the heap is subtracted before asking whether the JVM explains things.
-        long nmtNonHeap = nmtGrowth >= 0 ? nmtGrowth - Math.max(0, heapGrowth) : -1;
+        // A collector releasing metadata while a plugin leaks natively is exactly the case where
+        // the NMT total falls, and it is the case this report most needs to tell apart from "no
+        // NMT data" - so only the sentinel disqualifies the comparison, not a negative delta.
+        long nmtNonHeap = nmtGrowth != Long.MIN_VALUE ? nmtGrowth - Math.max(0, heapGrowth) : -1;
         boolean nmtExplains = nmtNonHeap > 0 && unaccountedGrowth > 0 && nmtNonHeap * 2 > unaccountedGrowth;
         boolean glibcExplains = arenaGrowth > 0 && unaccountedGrowth > 0
                 && arenaGrowth * 2 > unaccountedGrowth;
@@ -874,7 +906,7 @@ public final class OffHeapInvestigation {
             }
             return 0; // total line present but no delta shown - nothing changed
         }
-        return -1;
+        return Long.MIN_VALUE; // no total line at all - the diff could not be read
     }
 
     /** True when the window is too short for an hourly rate to mean anything. */

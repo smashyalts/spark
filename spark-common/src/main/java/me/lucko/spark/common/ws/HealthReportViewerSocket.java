@@ -40,6 +40,17 @@ public class HealthReportViewerSocket extends ViewerSocket {
 
     public HealthReportViewerSocket(SparkPlatform platform, BytesocksClient client) throws Exception {
         super(platform, client);
+    }
+
+    /**
+     * Begins ticking.
+     *
+     * <p>Separate from the constructor: scheduling there hands {@code this} to another thread
+     * before construction finishes, and the initial delay is a delay rather than a
+     * happens-before edge - the scheduler thread has no guaranteed visibility of anything the
+     * superclass constructor wrote, including the connection {@link #tick()} dereferences.</p>
+     */
+    public void start() {
         this.scheduler.scheduleAtFixedRate(this::tryTick, 10, 10, TimeUnit.SECONDS);
     }
 
@@ -65,7 +76,11 @@ public class HealthReportViewerSocket extends ViewerSocket {
 
     @Override
     public void close() {
-        this.scheduler.shutdownNow();
+        // shutdown(), not shutdownNow(), and only after the socket has been closed. close() is
+        // reached from tryTick() on this scheduler's own thread when the ping timeout fires, so
+        // shutdownNow() interrupts the very thread that is closing - and super.close() then does
+        // its network writes with the interrupt flag already set.
         super.close();
+        this.scheduler.shutdown();
     }
 }

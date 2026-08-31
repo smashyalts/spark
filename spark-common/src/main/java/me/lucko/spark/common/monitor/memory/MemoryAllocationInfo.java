@@ -132,8 +132,17 @@ public enum MemoryAllocationInfo {
                 long allocatedBytes = totalAllocatedBytes - this.previousAllocatedBytes;
                 long elapsedMillis = timeMillis - this.previousTimeMillis;
 
-                if (allocatedBytes >= 0) {
+                // elapsedMillis can be zero: scheduleAtFixedRate catches up after a stall by
+                // firing back to back, so two runs land in the same millisecond. The division
+                // then yields Infinity, or NaN when nothing was allocated, and new BigDecimal
+                // throws for both - which cancels this periodic task permanently and freezes
+                // every allocation statistic for the rest of the server's uptime, starting from
+                // the stall that is the reason anyone is looking.
+                if (allocatedBytes >= 0 && elapsedMillis > 0) {
                     double allocatedBytesPerSecond = allocatedBytes / (elapsedMillis / 1000.0);
+                    if (!Double.isFinite(allocatedBytesPerSecond)) {
+                        return;
+                    }
                     Metrics.MEMORY_ALLOCATION.record(timeMillis, allocatedBytesPerSecond);
 
                     BigDecimal allocatedBytesPerSecondDecimal = new BigDecimal(allocatedBytesPerSecond);

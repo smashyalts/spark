@@ -56,8 +56,8 @@ public class MetricSeries<T> {
     /** Number of valid samples currently stored */
     private int size;
 
-    /** Timestamp of the newest sample, or 0 if the series is empty */
-    private volatile long newestTimestamp;
+    /** Timestamp of the newest sample written, regardless of whether it is still retained */
+    private long newestTimestamp;
 
     public MetricSeries(Duration retention, int initialCapacity) {
         long retentionMillis = retention.toMillis();
@@ -234,7 +234,16 @@ public class MetricSeries<T> {
      * @return the timestamp of the newest sample, or 0 if empty
      */
     public long newestTimestamp() {
-        return this.newestTimestamp;
+        // Derived under the lock rather than read from a field. Resetting the field inside
+        // prune() would honour the "0 when empty" contract, but prune() runs from record()
+        // before the insert, so a lock-free reader could observe the zero in the middle of a
+        // recording and conclude nothing had ever been recorded.
+        this.lock.lock();
+        try {
+            return this.size == 0 ? 0 : this.newestTimestamp;
+        } finally {
+            this.lock.unlock();
+        }
     }
 
     /**
@@ -299,6 +308,10 @@ public class MetricSeries<T> {
         private final int[] timestampDeltasMs;
         private final Object[] values;
 
+        public boolean isEmpty() {
+            return this.values.length == 0;
+        }
+
         Export(long startTimestampMs, int[] timestampDeltasMs, Object[] values) {
             this.startTimestampMs = startTimestampMs;
             this.timestampDeltasMs = timestampDeltasMs;
@@ -323,8 +336,12 @@ public class MetricSeries<T> {
             super(retention, initialCapacity);
         }
 
+        /** @return the series, or null if it holds no samples */
         public SparkProtos.DoubleMetricSeries toProto() {
             Export export = export();
+            if (export.isEmpty()) {
+                return null;
+            }
             SparkProtos.DoubleMetricSeries.Builder builder = SparkProtos.DoubleMetricSeries.newBuilder()
                     .setStartTimestampMs(export.startTimestampMs())
                     .addAllTimestampDeltasMs(Ints.asList(export.timestampDeltasMs()));
@@ -340,8 +357,12 @@ public class MetricSeries<T> {
             super(retention, initialCapacity);
         }
 
+        /** @return the series, or null if it holds no samples */
         public SparkProtos.AveragesMetricSeries toProto() {
             Export export = export();
+            if (export.isEmpty()) {
+                return null;
+            }
             SparkProtos.AveragesMetricSeries.Builder builder = SparkProtos.AveragesMetricSeries.newBuilder()
                     .setStartTimestampMs(export.startTimestampMs())
                     .addAllTimestampDeltasMs(Ints.asList(export.timestampDeltasMs()));
@@ -358,8 +379,12 @@ public class MetricSeries<T> {
             super(retention, initialCapacity);
         }
 
+        /** @return the series, or null if it holds no samples */
         public SparkProtos.MemoryUsageMetricSeries toProto() {
             Export export = export();
+            if (export.isEmpty()) {
+                return null;
+            }
             SparkProtos.MemoryUsageMetricSeries.Builder builder = SparkProtos.MemoryUsageMetricSeries.newBuilder()
                     .setStartTimestampMs(export.startTimestampMs())
                     .addAllTimestampDeltasMs(Ints.asList(export.timestampDeltasMs()));
@@ -376,8 +401,12 @@ public class MetricSeries<T> {
             super(retention, initialCapacity);
         }
 
+        /** @return the series, or null if it holds no samples */
         public SparkProtos.WorldInfoMetricSeries toProto() {
             Export export = export();
+            if (export.isEmpty()) {
+                return null;
+            }
             SparkProtos.WorldInfoMetricSeries.Builder builder = SparkProtos.WorldInfoMetricSeries.newBuilder()
                     .setStartTimestampMs(export.startTimestampMs())
                     .addAllTimestampDeltasMs(Ints.asList(export.timestampDeltasMs()));

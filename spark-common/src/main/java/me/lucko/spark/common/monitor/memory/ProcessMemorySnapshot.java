@@ -110,9 +110,14 @@ public final class ProcessMemorySnapshot {
         s.cgroup = ProcessMemory.getCgroupMemory();
 
         MemoryMXBean memory = ManagementFactory.getMemoryMXBean();
-        s.heapUsed = memory.getHeapMemoryUsage().getUsed();
-        s.heapCommitted = memory.getHeapMemoryUsage().getCommitted();
-        s.heapMax = memory.getHeapMemoryUsage().getMax();
+        // One MemoryUsage, three fields. Each getHeapMemoryUsage() call queries the VM afresh, so
+        // reading it three times can produce a triple that never coexisted - used above committed
+        // after a GC, or committed above max after an expansion. unaccounted() subtracts
+        // heapCommitted from RSS and every verdict in OffHeapInvestigation turns on that figure.
+        java.lang.management.MemoryUsage heap = memory.getHeapMemoryUsage();
+        s.heapUsed = heap.getUsed();
+        s.heapCommitted = heap.getCommitted();
+        s.heapMax = heap.getMax();
         s.nonHeapCommitted = memory.getNonHeapMemoryUsage().getCommitted();
 
         for (MemoryPoolMXBean pool : ManagementFactory.getMemoryPoolMXBeans()) {
@@ -267,6 +272,8 @@ public final class ProcessMemorySnapshot {
     }
 
     public SparkSamplerProtos.ProcessMemoryData toProto() {
+        long unaccounted = unaccounted();
+
         SparkSamplerProtos.ProcessMemoryData.Builder proto = SparkSamplerProtos.ProcessMemoryData.newBuilder()
                 .setTimestamp(this.timestamp)
                 .setRss(Math.max(0, this.rss))
@@ -284,12 +291,15 @@ public final class ProcessMemorySnapshot {
                 .setNettyMaxDirect(Math.max(0, this.nettyMaxDirect))
                 .setThreads(this.threads)
                 .setPeakThreads(this.peakThreads)
-                .setThreadStackSize(this.threadStackSize)
+                // clamped for the same reason as the fields above: -1 means "the VM option could
+                // not be read", and a consumer multiplying threads by a negative stack size gets
+                // a negative thread-stack total
+                .setThreadStackSize(Math.max(0, this.threadStackSize))
                 .setLoadedClasses(this.loadedClasses)
                 // 0 rather than the Long.MIN_VALUE sentinel: the proto has no way to express
                 // "unavailable", and shipping the sentinel means every consumer - the viewer, the
                 // analysis scripts - reads it as a real measurement of -9.2 exabytes.
-                .setUnaccounted(unaccounted() == Long.MIN_VALUE ? 0 : unaccounted())
+                .setUnaccounted(unaccounted == Long.MIN_VALUE ? 0 : unaccounted)
                 .setAlwaysPreTouch(this.alwaysPreTouch)
                 .setAvailableProcessors(this.availableProcessors)
                 .setNmtEnabled(this.nmtEnabled);

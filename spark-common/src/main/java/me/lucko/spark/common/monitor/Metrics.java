@@ -90,17 +90,45 @@ public enum Metrics {
         return newestTimestamp == 0 || newestTimestamp < timeNow - INTERVAL_MILLIS;
     }
 
+    /**
+     * Exports every series that holds samples.
+     *
+     * <p>Emptiness is decided by {@code toProto} returning null rather than by a separate
+     * {@code isEmpty} test: the two were distinct lock acquisitions, so a concurrent recording -
+     * this runs on the viewer statistics tick while the monitors record - could prune a series
+     * between the guard and the export, and the profile then carried a series claiming to start
+     * at the epoch with no values in it.</p>
+     */
     public static SparkProtos.Metrics exportProto() {
         SparkProtos.Metrics.Builder builder = SparkProtos.Metrics.newBuilder();
-        if (!TPS.isEmpty()) builder.setTps(TPS.toProto());
-        if (!TICK_DURATION.isEmpty()) builder.setTickDuration(TICK_DURATION.toProto());
-        if (!CPU_USAGE_PROCESS.isEmpty()) builder.setCpuUsageProcess(CPU_USAGE_PROCESS.toProto());
-        if (!CPU_USAGE_SYSTEM.isEmpty()) builder.setCpuUsageSystem(CPU_USAGE_SYSTEM.toProto());
-        if (!MEMORY_USAGE_HEAP.isEmpty()) builder.setMemoryUsageHeap(MEMORY_USAGE_HEAP.toProto());
-        if (!MEMORY_USAGE_NON_HEAP.isEmpty()) builder.setMemoryUsageNonHeap(MEMORY_USAGE_NON_HEAP.toProto());
-        if (!MEMORY_ALLOCATION.isEmpty()) builder.setMemoryAllocation(MEMORY_ALLOCATION.toProto());
-        if (!WORLD_INFO.isEmpty()) builder.setWorldInfo(WORLD_INFO.toProto());
-        if (!PLAYER_PING.isEmpty()) builder.setPlayerPing(PLAYER_PING.toProto());
+
+        SparkProtos.DoubleMetricSeries tps = TPS.toProto();
+        if (tps != null) builder.setTps(tps);
+
+        SparkProtos.AveragesMetricSeries tickDuration = TICK_DURATION.toProto();
+        if (tickDuration != null) builder.setTickDuration(tickDuration);
+
+        SparkProtos.DoubleMetricSeries cpuProcess = CPU_USAGE_PROCESS.toProto();
+        if (cpuProcess != null) builder.setCpuUsageProcess(cpuProcess);
+
+        SparkProtos.DoubleMetricSeries cpuSystem = CPU_USAGE_SYSTEM.toProto();
+        if (cpuSystem != null) builder.setCpuUsageSystem(cpuSystem);
+
+        SparkProtos.MemoryUsageMetricSeries heap = MEMORY_USAGE_HEAP.toProto();
+        if (heap != null) builder.setMemoryUsageHeap(heap);
+
+        SparkProtos.MemoryUsageMetricSeries nonHeap = MEMORY_USAGE_NON_HEAP.toProto();
+        if (nonHeap != null) builder.setMemoryUsageNonHeap(nonHeap);
+
+        SparkProtos.DoubleMetricSeries allocation = MEMORY_ALLOCATION.toProto();
+        if (allocation != null) builder.setMemoryAllocation(allocation);
+
+        SparkProtos.WorldInfoMetricSeries worldInfo = WORLD_INFO.toProto();
+        if (worldInfo != null) builder.setWorldInfo(worldInfo);
+
+        SparkProtos.AveragesMetricSeries ping = PLAYER_PING.toProto();
+        if (ping != null) builder.setPlayerPing(ping);
+
         return builder.build();
     }
 

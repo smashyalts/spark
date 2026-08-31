@@ -213,7 +213,7 @@ public enum ProcessMemory {
 
     private static boolean isHeader(String line) {
         int dash = line.indexOf('-');
-        if (dash <= 0 || dash > 20 || line.isEmpty()) {
+        if (dash <= 0 || dash > 20) {
             return false;
         }
         char c = line.charAt(0);
@@ -315,8 +315,15 @@ public enum ProcessMemory {
             // Only consider the mapped path, and only executable mappings: a data file whose name
             // happens to contain "libjemalloc" is not a preloaded allocator, and matching one
             // would suppress every piece of glibc advice on a server that is in fact using glibc.
+            // The permission field specifically, not "an x anywhere after the address range":
+            // on x86_64 the path itself contains one (/usr/lib/x86_64-linux-gnu/...), so scanning
+            // the rest of the line matched every mapping and this guard did nothing at all.
             int slash = line.lastIndexOf('/');
-            if (slash < 0 || line.indexOf("x", line.indexOf(' ')) < 0) {
+            if (slash < 0) {
+                continue;
+            }
+            String[] fields = line.split("\\s+", 3);
+            if (fields.length < 2 || fields[1].indexOf('x') < 0) {
                 continue;
             }
             String file = line.substring(slash + 1);
@@ -350,7 +357,11 @@ public enum ProcessMemory {
         if (current != null) {
             out.put("memory.current", current);
             Long max = readSingleValue(LinuxProc.CGROUP_V2_MEMORY_MAX);
-            if (max != null) {
+            // Same sentinel filter the v1 branch below applies. An unlimited cgroup writes the
+            // literal "max", which readSingleValue maps to Long.MAX_VALUE - and this map goes
+            // straight into the proto, so shipping it has consumers charting an 8 exabyte limit
+            // and computing usage as 0% of it.
+            if (max != null && max < Long.MAX_VALUE / 2) {
                 out.put("memory.max", max);
             }
             readStatKeys(LinuxProc.CGROUP_V2_MEMORY_STAT, out,
