@@ -31,6 +31,7 @@ import me.lucko.spark.common.command.tabcomplete.TabCompleter;
 import me.lucko.spark.common.monitor.DiagnosticCommand;
 import me.lucko.spark.common.monitor.MonitoringExecutor;
 import me.lucko.spark.common.monitor.memory.GlibcArenaInfo;
+import me.lucko.spark.common.monitor.memory.NettyLeakDetector;
 import me.lucko.spark.common.monitor.memory.OffHeapInvestigation;
 import me.lucko.spark.common.monitor.memory.ProcessMemory;
 import me.lucko.spark.common.monitor.memory.ProcessMemorySnapshot;
@@ -57,7 +58,9 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
@@ -161,6 +164,7 @@ public class NativeMemoryModule implements CommandModule {
                 .argumentUsage("watch", "minutes")
                 .argumentUsage("dump", null)
                 .argumentUsage("investigate", "minutes")
+                .argumentUsage("netty-leak", "level")
                 .argumentUsage("diagnose", null)
                 .argumentUsage("jcmd", "command")
                 .argumentUsage("upload", null)
@@ -168,7 +172,7 @@ public class NativeMemoryModule implements CommandModule {
                 .tabCompleter((platform, sender, arguments) -> TabCompleter.completeForOpts(arguments,
                         "--maps", "--top", "--nmt", "--nmt-baseline", "--nmt-diff", "--trim",
                         "--flags", "--baseline", "--diff", "--watch", "--dump", "--investigate",
-                        "--diagnose", "--jcmd", "--upload"))
+                        "--netty-leak", "--diagnose", "--jcmd", "--upload"))
                 .build()
         );
     }
@@ -188,7 +192,8 @@ public class NativeMemoryModule implements CommandModule {
         boolean procAvailable = ProcessMemory.getResidentSetSize() >= 0;
         boolean needsProc = !arguments.boolFlag("jcmd")
                 && !arguments.boolFlag("nmt") && !arguments.boolFlag("nmt-baseline")
-                && !arguments.boolFlag("nmt-diff") && !arguments.boolFlag("flags");
+                && !arguments.boolFlag("nmt-diff") && !arguments.boolFlag("flags")
+                && !arguments.boolFlag("netty-leak");
         if (!procAvailable && needsProc) {
             resp.replyPrefixed(text("This view needs /proc and is only available on Linux.", RED));
             resp.replyPrefixed(text("--jcmd, --nmt and --flags work on any platform.", GRAY));
@@ -232,14 +237,15 @@ public class NativeMemoryModule implements CommandModule {
             // intFlag returns -1 when the flag was given without a value. Defaulting to the
             // documented interval is friendlier than the alternative, where a bare '--watch'
             // silently STOPS recording - the exact opposite of what was typed.
-            int minutes = arguments.intFlag("watch");
-            configureWatch(platform, resp, minutes == -1 ? DEFAULT_WATCH_MINUTES : minutes);
+            configureWatch(platform, resp, intFlagOrDefault(arguments, "watch", DEFAULT_WATCH_MINUTES));
             return;
         }
         if (arguments.boolFlag("investigate")) {
-            int minutes = arguments.intFlag("investigate");
-            // intFlag returns -1 for a bare flag; that means "use the default", not "cancel".
-            startInvestigation(platform, resp, minutes == -1 ? 120 : minutes);
+            startInvestigation(platform, resp, intFlagOrDefault(arguments, "investigate", 120));
+            return;
+        }
+        if (arguments.boolFlag("netty-leak")) {
+            configureNettyLeakDetection(resp, arguments);
             return;
         }
         if (arguments.boolFlag("dump")) {
@@ -714,6 +720,85 @@ public class NativeMemoryModule implements CommandModule {
         }
     }
 
+    /**
+     * Reads an int flag, falling back to {@code def} when the flag was given without a value.
+     *
+     * <p>A flag with no value parses to an empty string rather than to nothing, so
+     * {@link Arguments#intFlag} never reaches its -1 "undefined" return: it calls
+     * {@code Integer.parseInt("")} and throws "Please specify a number!" instead. Both call sites
+     * offer a bare form as the default - and both were rejecting it.</p>
+     */
+    private static int intFlagOrDefault(Arguments arguments, String key, int def) {
+        return flagValue(arguments, key) == null ? def : arguments.intFlag(key);
+    }
+
+    /**
+     * The value given for a flag, or null if the flag was given bare.
+     */
+    private static String flagValue(Arguments arguments, String key) {
+        Iterator<String> it = arguments.stringFlag(key).iterator();
+        if (!it.hasNext()) {
+            return null;
+        }
+        String value = it.next().trim();
+        return value.isEmpty() ? null : value;
+    }
+
+    /**
+     * Reads or sets Netty's leak detection level.
+     *
+     * <p>Exists so the level can be raised without {@code -Dio.netty.leakDetection.level} and a
+     * restart. On a server losing direct memory to its network stack the restart is the problem:
+     * it clears the leak along with the evidence, and the operator has to wait for it to build up
+     * again before they can look.</p>
+     */
+    private void configureNettyLeakDetection(CommandResponseHandler resp, Arguments arguments) {
+        String current = NettyLeakDetector.currentLevel();
+        if (current == null) {
+            resp.replyPrefixed(text("Netty's leak detector is not reachable on this server.", RED));
+            resp.replyPrefixed(text("io.netty.util.ResourceLeakDetector could not be loaded - either", GRAY));
+            resp.replyPrefixed(text("netty is absent, or this platform relocates it into another package.", GRAY));
+            return;
+        }
+
+        String requested = flagValue(arguments, "netty-leak");
+        if (requested == null) {
+            resp.replyPrefixed(text("Netty leak detection: ", GOLD).append(text(current, WHITE)));
+            resp.replyPrefixed(text("Levels: " + String.join(", ", NettyLeakDetector.levels()), GRAY));
+            return;
+        }
+
+        if (!NettyLeakDetector.setLevel(requested)) {
+            resp.replyPrefixed(text("Not a level: " + requested, RED));
+            resp.replyPrefixed(text("Use one of: " + String.join(", ", NettyLeakDetector.levels()), GRAY));
+            return;
+        }
+
+        String now = NettyLeakDetector.currentLevel();
+        resp.replyPrefixed(text("Netty leak detection: ", GREEN)
+                .append(text(current, GRAY))
+                .append(text(" -> ", DARK_GRAY))
+                .append(text(now == null ? requested : now, WHITE)));
+
+        // Everything below is what makes the setting usable rather than merely applied.
+        resp.replyPrefixed(text("Reports go to the SERVER log, not to spark - netty writes them", GRAY));
+        resp.replyPrefixed(text("through its own logger. Search the log for 'LEAK:'.", GRAY));
+        resp.replyPrefixed(text("A leak is only reported once the buffer is garbage collected, so", GRAY));
+        resp.replyPrefixed(text("expect nothing until the next few GCs have run.", GRAY));
+        resp.replyPrefixed(text("This finds unreleased netty ByteBufs only. For malloc, mapped files", GRAY));
+        resp.replyPrefixed(text("or arena retention use --investigate.", GRAY));
+
+        String lower = requested.toLowerCase(Locale.ROOT);
+        if (lower.equals("paranoid")) {
+            resp.replyPrefixed(text("PARANOID tracks every buffer and is very expensive - it is a", YELLOW));
+            resp.replyPrefixed(text("short-window setting, not one to leave on.", YELLOW));
+        } else if (lower.equals("advanced")) {
+            resp.replyPrefixed(text("ADVANCED samples about 1% of buffers and records access traces.", YELLOW));
+            resp.replyPrefixed(text("Measurable overhead; fine for hours, not for good.", YELLOW));
+        }
+        resp.replyPrefixed(text("The level resets to the JVM default on restart.", DARK_GRAY));
+    }
+
     // ------------------------------------------------------------------- watch & dump
 
     private void configureWatch(SparkPlatform platform, CommandResponseHandler resp, int minutes) {
@@ -899,9 +984,13 @@ public class NativeMemoryModule implements CommandModule {
         }
 
         String command = values.iterator().next();
-        String lower = command.toLowerCase();
+        // Locale.ROOT: the blocklist below is matched on a lower-cased copy of a command NAME.
+        // Under a Turkish locale the default folds 'I' to a dotless one, so a typed
+        // "COMPILER.DIRECTIVES" would not match "compiler.directives" and the guard that refuses
+        // destructive commands would be bypassed by nothing more than the server's locale.
+        String lower = command.toLowerCase(Locale.ROOT);
         for (String blocked : DESTRUCTIVE_COMMANDS) {
-            if (lower.startsWith(blocked.toLowerCase())) {
+            if (lower.startsWith(blocked.toLowerCase(Locale.ROOT))) {
                 resp.replyPrefixed(text(command + " is not available through this command.", RED));
                 resp.replyPrefixed(text("It writes huge files, mutates the VM, or pauses it for a long time.", GRAY));
                 resp.replyPrefixed(text("Run it from a shell with jcmd if you have decided you want it.", GRAY));
@@ -909,7 +998,7 @@ public class NativeMemoryModule implements CommandModule {
             }
         }
         for (String expensive : EXPENSIVE_COMMANDS) {
-            if (lower.startsWith(expensive.toLowerCase())) {
+            if (lower.startsWith(expensive.toLowerCase(Locale.ROOT))) {
                 resp.replyPrefixed(text("Note: " + command + " walks a large structure or brings every", YELLOW));
                 resp.replyPrefixed(text("thread to a safepoint, and can pause a big server noticeably.", YELLOW));
                 break;
