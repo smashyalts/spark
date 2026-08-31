@@ -354,14 +354,21 @@ public class AsyncProfilerJob {
     }
 
     private <E extends JfrReader.Event> void readSegments(JfrReader reader, SampleCollector<E> collector, AsyncDataAggregator dataAggregator) throws IOException {
+        boolean threadScoped = collector.isThreadScoped();
         List<E> samples = reader.readAllEvents(collector.eventClass());
         for (E sample : samples) {
             String threadName = reader.threads.get((long) sample.tid);
             if (threadName == null) {
-                continue;
+                // A thread the recording never named. For an execution profile there is nothing
+                // useful to show, but for a leak the bytes still count - and native allocations
+                // are routinely made on threads that never appear in the Java thread pool.
+                if (threadScoped) {
+                    continue;
+                }
+                threadName = "unknown thread #" + sample.tid;
             }
 
-            if (!this.threadDumper.isThreadIncluded(sample.tid, threadName)) {
+            if (threadScoped && !this.threadDumper.isThreadIncluded(sample.tid, threadName)) {
                 continue;
             }
 
@@ -463,12 +470,13 @@ public class AsyncProfilerJob {
                 continue;
             }
 
+            // Deliberately not thread-filtered, and unnamed threads are kept. The default
+            // dumper on most platforms is the server thread alone, so filtering here discarded
+            // every leak allocated anywhere else and reported zero leaked bytes next to
+            // has_native_memory = true - a result no reader can tell from "found nothing".
             String threadName = reader.threads.get((long) st.tid);
             if (threadName == null) {
-                continue;
-            }
-            if (!this.threadDumper.isThreadIncluded(st.tid, threadName)) {
-                continue;
+                threadName = "unknown thread #" + st.tid;
             }
 
             JfrReader.MallocEvent event = new JfrReader.MallocEvent(st.time, st.tid, st.stackTraceId, 0L, st.size);

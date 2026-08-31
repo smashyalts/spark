@@ -1,0 +1,3 @@
+spark-bukkit\build\libs\spark-1.10.217-bukkit.jar
+spark-geyser\build\libs\spark-1.10.217-geyser.jar
+spark-velocity\build\libs\spark-1.10.217-velocity.jar

@@ -69,6 +69,24 @@ public interface SampleCollector<E extends Event> {
     SamplerMode getMode();
 
     /**
+     * Whether this collector's events should be restricted to the profiled threads.
+     *
+     * <p>True for the collectors that measure what a thread is doing: "profile the server
+     * thread" is the whole point of a thread filter, and samples from elsewhere are noise.</p>
+     *
+     * <p>False for the leak collectors, where the allocating thread is incidental. Memory
+     * leaked on a Netty IO thread is leaked whether or not the operator happened to be
+     * profiling that thread, and the default dumper on most platforms is the server thread
+     * alone - so applying the filter silently discarded almost every leak and reported the
+     * result as zero bytes, which is indistinguishable from a clean bill of health.</p>
+     *
+     * @return true if the thread filter applies to this collector
+     */
+    default boolean isThreadScoped() {
+        return true;
+    }
+
+    /**
      * Sample collector for execution (cpu time) profiles.
      */
     final class Execution implements SampleCollector<ExecutionSample> {
@@ -214,6 +232,11 @@ public interface SampleCollector<E extends Event> {
         public SamplerMode getMode() {
             return SamplerMode.ALLOCATION;
         }
+
+        @Override
+        public boolean isThreadScoped() {
+            return false; // a leak belongs to the process, not to a thread
+        }
     }
 
     /**
@@ -262,6 +285,11 @@ public interface SampleCollector<E extends Event> {
         @Override
         public SamplerMode getMode() {
             return SamplerMode.NATIVE_MEMORY;
+        }
+
+        @Override
+        public boolean isThreadScoped() {
+            return false; // a leak belongs to the process, not to a thread
         }
     }
 
